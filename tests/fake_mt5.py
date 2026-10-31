@@ -8,6 +8,7 @@ import pandas as pd
 import config
 
 SIN_RESPUESTA = "sin respuesta"  # en `respuestas`: order_send devuelve None
+INCIERTOS = (_mt5.TRADE_RETCODE_PLACED, _mt5.TRADE_RETCODE_TIMEOUT, _mt5.TRADE_RETCODE_CONNECTION)
 
 
 class FakeMT5:
@@ -20,8 +21,11 @@ class FakeMT5:
         self.bar_time = 1_793_318_400  # apertura de la vela en formación (hora del servidor)
         self.tick = SimpleNamespace(time=self.bar_time + 5, bid=1.10000, ask=1.10002)
         self.posiciones, self.deals, self.enviadas = [], [], []
-        self.respuestas = []             # retcodes forzados para los próximos order_send
-        self.ejecutar_si_incierto = False
+        self.ordenes, self.historial_ordenes = [], []   # órdenes activas y terminadas
+        self.respuestas = []      # retcodes forzados para los próximos order_send
+        # Qué pasa con una orden de resultado incierto: "ejecuta" (enseguida), "coloca" (queda activa en el
+        # servidor hasta ejecutar_colocadas() o cancelar_colocadas()) o "nada" (nunca llegó al servidor).
+        self.modo_incierto = "nada"
         self.fraccion_parcial = 0.5
         self._ticket = 5000
 
@@ -29,6 +33,10 @@ class FakeMT5:
         if nombre.isupper():  # constantes reales: ORDER_TYPE_BUY, TRADE_RETCODE_DONE...
             return getattr(_mt5, nombre)
         raise AttributeError(nombre)
+
+    def _nuevo_ticket(self) -> int:
+        self._ticket += 1
+        return self._ticket
 
     # --- reloj de velas ---
     def avanzar_vela(self, n: int = 1) -> None:
@@ -74,17 +82,27 @@ class FakeMT5:
     def positions_get(self, symbol=None):
         return tuple(self.posiciones)
 
+    def orders_get(self, symbol=None):
+        return tuple(self.ordenes)
+
+    def history_orders_get(self, _desde, _hasta):
+        return tuple(self.historial_ordenes)
+
     def history_deals_get(self, _desde, _hasta):
         return tuple(self.deals)
 
     # --- órdenes ---
     def abrir_posicion(self, tipo=None, volumen=0.01, time=None) -> SimpleNamespace:
-        self._ticket += 1
-        pos = SimpleNamespace(ticket=self._ticket, type=_mt5.POSITION_TYPE_BUY if tipo is None else tipo,
+        pos = SimpleNamespace(ticket=self._nuevo_ticket(), type=_mt5.POSITION_TYPE_BUY if tipo is None else tipo,
                               volume=volumen, time=self.tick.time if time is None else time,
                               magic=config.MAGIC_NUMBER, price_open=self.tick.ask, sl=1.09, tp=1.12)
         self.posiciones.append(pos)
         return pos
+
+    def cerrar_por_sl(self, pos) -> None:
+        """El servidor cierra la posición por su SL (sin que el bot envíe nada)."""
+        self.posiciones.remove(pos)
+        self.deals.append(self._deal(_mt5.DEAL_ENTRY_OUT, self._nuevo_ticket(), pos.ticket, pos.volume, pos.sl, "sl"))
 
     def order_check(self, _request):
         return SimpleNamespace(retcode=0, comment="Done")
@@ -92,32 +110,53 @@ class FakeMT5:
     def order_send(self, request):
         self.enviadas.append(request)
         retcode = self.respuestas.pop(0) if self.respuestas else _mt5.TRADE_RETCODE_DONE
-        incierto = retcode == SIN_RESPUESTA or retcode in (_mt5.TRADE_RETCODE_PLACED, _mt5.TRADE_RETCODE_TIMEOUT,
-                                                          _mt5.TRADE_RETCODE_CONNECTION)
-        ejecuta = retcode in (_mt5.TRADE_RETCODE_DONE, _mt5.TRADE_RETCODE_DONE_PARTIAL) or (
-            incierto and self.ejecutar_si_incierto)
+        orden = self._nuevo_ticket()
+        incierto = retcode == SIN_RESPUESTA or retcode in INCIERTOS
         volumen = round(request["volume"] * (self.fraccion_parcial if retcode == _mt5.TRADE_RETCODE_DONE_PARTIAL else 1), 8)
-        if ejecuta:
-            self._aplicar(request, volumen)
+        ejecutada = False
+        if retcode in (_mt5.TRADE_RETCODE_DONE, _mt5.TRADE_RETCODE_DONE_PARTIAL) or (incierto and self.modo_incierto == "ejecuta"):
+            self._ejecutar(request, volumen, orden)
+            ejecutada = True
+        elif incierto and self.modo_incierto == "coloca":
+            self.ordenes.append(SimpleNamespace(ticket=orden, time_setup=self.tick.time, state=_mt5.ORDER_STATE_PLACED,
+                                                magic=request["magic"], symbol=request["symbol"], request=request))
         if retcode == SIN_RESPUESTA:
             return None
-        return SimpleNamespace(retcode=retcode, order=self._ticket, volume=volumen if ejecuta else 0.0,
-                               price=request["price"], comment="fake")
+        return SimpleNamespace(retcode=retcode, order=orden if self.modo_incierto != "nada" or not incierto else 0,
+                               volume=volumen if ejecutada else 0.0, price=request["price"], comment="fake")
 
-    def _aplicar(self, request, volumen):
-        self._ticket += 1
+    def ejecutar_colocadas(self) -> None:
+        """Las órdenes que quedaron colocadas se ejecutan tarde."""
+        for orden in list(self.ordenes):
+            self.ordenes.remove(orden)
+            self._ejecutar(orden.request, orden.request["volume"], orden.ticket)
+
+    def cancelar_colocadas(self) -> None:
+        for orden in list(self.ordenes):
+            self.ordenes.remove(orden)
+            self.historial_ordenes.append(SimpleNamespace(**{**vars(orden), "state": _mt5.ORDER_STATE_CANCELED}))
+
+    def _deal(self, entry, orden, posicion, volumen, precio, comentario):
+        return SimpleNamespace(ticket=self._nuevo_ticket(), order=orden, position_id=posicion, entry=entry,
+                               magic=config.MAGIC_NUMBER, symbol=config.SYMBOL, time=self.tick.time, volume=volumen,
+                               price=precio, profit=-1.5 if entry == _mt5.DEAL_ENTRY_OUT else 0.0,
+                               swap=-0.1 if entry == _mt5.DEAL_ENTRY_OUT else 0.0, commission=0.0, fee=0.0,
+                               comment=comentario)
+
+    def _ejecutar(self, request, volumen, orden):
+        self.historial_ordenes.append(SimpleNamespace(ticket=orden, time_setup=self.tick.time, magic=request["magic"],
+                                                      symbol=request["symbol"], state=_mt5.ORDER_STATE_FILLED))
         if "position" in request:  # cierre total o parcial
             pos = next(p for p in self.posiciones if p.ticket == request["position"])
             self.posiciones.remove(pos)
             restante = round(pos.volume - volumen, 8)
             if restante > 0:
                 self.posiciones.append(SimpleNamespace(**{**vars(pos), "volume": restante}))
-            self.deals.append(SimpleNamespace(ticket=self._ticket, position_id=pos.ticket, entry=_mt5.DEAL_ENTRY_OUT,
-                                              magic=request["magic"], symbol=request["symbol"], time=self.tick.time,
-                                              volume=volumen, price=request["price"], profit=-1.5, swap=-0.1,
-                                              commission=0.0, fee=0.0, comment=request["comment"]))
-        else:
+            self.deals.append(self._deal(_mt5.DEAL_ENTRY_OUT, orden, pos.ticket, volumen, request["price"],
+                                         request["comment"]))
+        else:  # en MT5 el ticket de la posición es el de la orden que la abrió
             self.posiciones.append(SimpleNamespace(
-                ticket=self._ticket, volume=volumen, time=self.tick.time, magic=request["magic"],
+                ticket=orden, volume=volumen, time=self.tick.time, magic=request["magic"],
                 type=_mt5.POSITION_TYPE_BUY if request["type"] == _mt5.ORDER_TYPE_BUY else _mt5.POSITION_TYPE_SELL,
                 price_open=request["price"], sl=request["sl"], tp=request["tp"]))
+            self.deals.append(self._deal(_mt5.DEAL_ENTRY_IN, orden, orden, volumen, request["price"], request["comment"]))

@@ -27,6 +27,7 @@ Cada orden enviada por el bot incorpora protección estricta desde su creación 
 | `MAX_DRAWDOWN_PCT` | `0.10` | Sin nuevas entradas si la equity cae este % desde su máximo. El máximo se guarda en `logs/estado_bot.json`, así que sobrevive a reinicios; para reanudar hay que revisarlo y borrar el archivo. |
 | `REINTENTO_CIERRE_S` | `10` segundos | Si un cierre por time stop falla, pausa antes del siguiente intento (sin esperar a otra vela). |
 | `ESPERA_RECONCILIACION_S` | `1` segundo | Espera antes de mirar las posiciones cuando `order_send` da un resultado incierto. |
+| `PENDIENTE_SIN_RASTRO_S` | `600` segundos | Una entrada incierta que no aparece en posiciones, órdenes activas ni historial tras este tiempo se da por no enviada. Con `None`, siempre hay que resolverla a mano. |
 | `EXIGIR_VENTAJA_SIGNIFICATIVA` | `True` | El bot no arranca si el modelo no tiene ventaja significativa en el walk-forward y en el holdout ([Entrenamiento.md](Entrenamiento.md)). Ponerlo en `False` solo para probar la mecánica en Demo. |
 | `T_MINIMO_TEST` | `2.0` | La esperanza agregada de todos los tests del walk-forward debe superar 0 por al menos 2 errores estándar (`t = media / (std / √n)`). |
 | `MIN_TRADES_TEST` | `30` | Trades fuera de muestra mínimos para que ese `t` sea fiable. |
@@ -82,9 +83,10 @@ flowchart TD
     CheckConn -- "Sí, tras reconectar" --> Reverif["Verificar cuenta:<br>mismo login y Demo"] --> Equity
     CheckConn -- Sí --> Equity["Actualizar máximo de equity<br>(logs/estado_bot.json)"]
 
-    Equity --> CheckPos{"¿Posición abierta<br>con Magic Number?"}
+    Equity --> Resolver["Resolver la entrada pendiente, si la hay:<br>posiciones, órdenes activas, historial"]
+    Resolver --> CheckPos{"¿Posición abierta<br>con Magic Number?"}
     CheckPos -- Sí --> CheckTimeout{"¿Velas en el trade<br>≥ MAX_BARS_EN_TRADE?"}
-    CheckTimeout -- Sí --> ClosePos["Cerrar a mercado; si falla,<br>reintento tras REINTENTO_CIERRE_S"] --> CheckNewBar
+    CheckTimeout -- Sí --> ClosePos["Cerrar a mercado (salvo si ya hay un cierre<br>colocado); si falla, reintento tras REINTENTO_CIERRE_S"] --> CheckNewBar
     CheckTimeout -- No --> CheckNewBar
     CheckPos -- No --> CheckNewBar{"¿Nueva vela?<br>time != last_bar_time"}
 
@@ -94,7 +96,9 @@ flowchart TD
     HabiaPos -- Sí --> SleepLoop
     HabiaPos -- No --> Limites{"¿Pausa, drawdown o<br>pérdida diaria al límite?"}
     Limites -- Sí --> SleepLoop
-    Limites -- No --> Filtros{"¿Retraso ≤ MAX_RETRASO_ENTRADA_S<br>y spread ≤ MAX_SPREAD_PUNTOS?"}
+    Limites -- No --> Ordenes{"¿Entrada pendiente u orden<br>del bot colocada?"}
+    Ordenes -- Sí --> SleepLoop
+    Ordenes -- No --> Filtros{"¿Retraso ≤ MAX_RETRASO_ENTRADA_S<br>y spread ≤ MAX_SPREAD_PUNTOS?"}
     Filtros -- No --> SleepLoop
     Filtros -- Sí --> Predict["200 velas cerradas → build_features()<br>→ predict_proba Long y Short"]
 
@@ -106,7 +110,9 @@ flowchart TD
     SendBuy --> Result{"Resultado de order_send"}
     SendSell --> Result
     Result -- "DONE / DONE_PARTIAL" --> Log["Registrar en logs/operaciones.csv"] --> SleepLoop
-    Result -- "Incierto: sin respuesta,<br>PLACED, TIMEOUT, CONNECTION" --> Reconcile["Mirar las posiciones:<br>¿se ejecutó?"] --> Log
+    Result -- "Incierto: sin respuesta,<br>PLACED, TIMEOUT, CONNECTION" --> Reconcile{"¿Ya hay posición?"}
+    Reconcile -- Sí --> Log
+    Reconcile -- No --> Pendiente["Guardar entrada pendiente<br>(logs/estado_bot.json): sin nuevas<br>entradas hasta resolverla"] --> SleepLoop
     Result -- "Rechazo" --> LogErr["Registrar retcode y comment"] --> SleepLoop
 ```
 
@@ -138,7 +144,13 @@ velas_en_trade = sum(r["time"] + tf_segundos > position.time for r in cerradas)
 1. **Mono-posición y una sola instancia:** El bot no realiza operaciones concurrentes ni promedia a la baja (*no Martingala ni Grid*); solo mantiene una posición por símbolo. Al arrancar bloquea `logs/trading_bot.lock` con un bloqueo del sistema operativo, así que una segunda instancia se detiene. El bloqueo se libera solo si el proceso muere.
 2. **Resultados de las órdenes ([códigos de MT5](https://www.mql5.com/en/docs/constants/errorswarnings/enum_trade_return_codes)):**
    * `10009` DONE y `10010` DONE_PARTIAL cuentan como ejecutadas; la parcial se avisa en el log con el volumen real.
-   * Sin respuesta (`order_send` devuelve `None`), `10008` PLACED, `10012` TIMEOUT y `10031` CONNECTION son **inciertos**: antes de decidir, el bot mira las posiciones para saber si la orden se ejecutó. Así no duplica una entrada ni da por cerrada una posición abierta.
+   * Sin respuesta (`order_send` devuelve `None`), `10008` PLACED, `10012` TIMEOUT y `10031` CONNECTION son **inciertos**. Si al segundo ya hay posición, la entrada se da por ejecutada. Si no, **no** se da por fallida: PLACED significa que la orden está colocada y puede ejecutarse más tarde. El bot guarda la **entrada pendiente** en `logs/estado_bot.json`, para que sobreviva a un reinicio, y no abre nada más hasta resolverla. En cada vuelta mira:
+     * las posiciones: si aparece la posición, la entrada se ejecutó;
+     * las órdenes activas (`orders_get`): si la orden sigue colocada, espera;
+     * el historial de órdenes y deals: una orden ejecutada, aunque la posición ya se haya cerrado por SL/TP, cuenta como ejecutada; una orden cancelada, rechazada o expirada, como no ejecutada.
+
+     Una consulta vacía del historial no prueba nada, porque justo después de conectar MT5 puede devolverlo incompleto. Por eso, sin ninguna prueba, la entrada solo se da por no enviada tras `PENDIENTE_SIN_RASTRO_S` sin rastro en ningún sitio.
+   * Mientras haya cualquier orden del bot colocada en el servidor no se abre una entrada nueva ni se envía otro cierre por time stop.
    * Cualquier otro código es un rechazo. No se reintenta a ciegas: se registran `retcode` y `comment`. Frecuentes: `10004` requote, `10014` volumen inválido, `10016` stops inválidos, `10018` mercado cerrado, `10019` margen insuficiente, `10030` modo de llenado no soportado.
 3. **Cuenta:** se verifica al arrancar, tras cada reconexión y antes de cada orden. Si cambia el login o la cuenta es real sin permiso, el bot se detiene.
 4. **Control de desconexión:** Si se pierde la conexión con el servidor del broker, las órdenes en el mercado siguen protegidas porque el Stop Loss y Take Profit residen en el servidor de MetaTrader, no en la memoria local del script de Python. El **time stop** sí depende del script: se comprueba en cada vuelta, así que si vence durante una desconexión o con el bot parado, la posición se cierra en cuanto vuelve la conexión. El conteo usa `position.time`, de modo que sobrevive a un reinicio.
@@ -152,6 +164,7 @@ velas_en_trade = sum(r["time"] + tf_segundos > position.time for r in cerradas)
 * **Pruebas automáticas:** `python -m pytest tests` (unos 50 s). `tests/test_bot.py` usa un MT5 simulado para cubrir:
   * cierres rechazados que se reintentan sin esperar otra vela, y el reinicio con una posición vencida;
   * ejecuciones parciales al abrir y al cerrar, y resultados inciertos (ejecutados o no) sin duplicar;
+  * órdenes PLACED que se ejecutan tarde, se cancelan, o entran y salen por SL antes de que el bot las vea; respuestas perdidas sin rastro; la entrada pendiente tras un reinicio; y cierres colocados que no se duplican;
   * cambio de cuenta tras reconectar, cuenta real e instancia única;
   * pausa, pérdida diaria, drawdown persistido y el registro de operaciones.
 

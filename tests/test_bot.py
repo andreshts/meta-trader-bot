@@ -16,7 +16,7 @@ from features import FEATURES
 from fake_mt5 import SIN_RESPUESTA, FakeMT5
 
 DONE, PARCIAL, RECHAZO = tb.mt5.TRADE_RETCODE_DONE, tb.mt5.TRADE_RETCODE_DONE_PARTIAL, tb.mt5.TRADE_RETCODE_REJECT
-TIMEOUT = tb.mt5.TRADE_RETCODE_TIMEOUT
+TIMEOUT, PLACED = tb.mt5.TRADE_RETCODE_TIMEOUT, tb.mt5.TRADE_RETCODE_PLACED
 
 
 class ModeloFijo:
@@ -136,21 +136,107 @@ def test_apertura_parcial_cuenta_como_ejecutada(mt5, bundle):
 
 def test_resultado_incierto_se_reconcilia_y_no_duplica(mt5, bundle):
     estado = nuevo_estado(mt5)
-    mt5.respuestas, mt5.ejecutar_si_incierto = [SIN_RESPUESTA], True
+    mt5.respuestas, mt5.modo_incierto = [SIN_RESPUESTA], "ejecuta"
     tb.ciclo(bundle, estado)
-    assert len(mt5.posiciones) == 1
+    assert len(mt5.posiciones) == 1 and estado.get("pendiente") is None
     assert operaciones()[0]["evento"].endswith("(reconciliada)")
     mt5.avanzar_vela()
     tb.ciclo(bundle, estado)
     assert len(aperturas(mt5)) == 1
 
 
-def test_resultado_incierto_no_ejecutado(mt5):
+def test_resultado_incierto_sin_posicion_no_se_da_por_fallido(mt5):
     request = {"type": tb.mt5.ORDER_TYPE_BUY, "volume": 0.01, "price": 1.1, "magic": config.MAGIC_NUMBER,
                "symbol": config.SYMBOL, "sl": 1.09, "tp": 1.12, "comment": "x"}
     mt5.respuestas = [TIMEOUT]
-    assert tb.enviar(request, "Prueba", confirmar=lambda: tb.posicion_abierta() is not None) is False
-    assert mt5.posiciones == []
+    resultado, _ = tb.enviar(request, "Prueba", confirmar=lambda: tb.posicion_abierta() is not None)
+    assert resultado == tb.INCIERTA and mt5.posiciones == []
+
+
+# ---------------- órdenes con resultado incierto (regresión: ejecución tardía) ----------------
+def test_orden_colocada_que_se_ejecuta_tarde_no_duplica(mt5, bundle):
+    """PLACED sin posición todavía: antes el bot lo daba por no ejecutado y abría otra entrada en la vela siguiente."""
+    estado = nuevo_estado(mt5)
+    mt5.respuestas, mt5.modo_incierto = [PLACED], "coloca"
+    tb.ciclo(bundle, estado)
+    assert mt5.posiciones == [] and len(mt5.ordenes) == 1 and estado["pendiente"]["orden"] == mt5.ordenes[0].ticket
+    mt5.avanzar_vela()
+    tb.ciclo(bundle, estado)                 # la orden sigue colocada: no se abre otra
+    assert len(aperturas(mt5)) == 1
+    mt5.ejecutar_colocadas()                 # ejecución tardía
+    tb.ciclo(bundle, estado)
+    assert estado["pendiente"] is None
+    mt5.avanzar_vela()
+    tb.ciclo(bundle, estado)
+    assert len(aperturas(mt5)) == 1 and len(mt5.posiciones) == 1
+
+
+def test_orden_colocada_y_cancelada_libera_las_entradas(mt5, bundle):
+    estado = nuevo_estado(mt5)
+    mt5.respuestas, mt5.modo_incierto = [PLACED], "coloca"
+    tb.ciclo(bundle, estado)
+    mt5.cancelar_colocadas()
+    mt5.avanzar_vela()
+    tb.ciclo(bundle, estado)                 # consta como cancelada: se resuelve y se puede volver a entrar
+    assert estado["pendiente"] is None and len(aperturas(mt5)) == 2 and len(mt5.posiciones) == 1
+
+
+def test_pendiente_ejecutada_y_cerrada_por_sl_se_resuelve(mt5, bundle):
+    estado = nuevo_estado(mt5)
+    mt5.respuestas, mt5.modo_incierto = [PLACED], "coloca"
+    tb.ciclo(bundle, estado)
+    mt5.ejecutar_colocadas()
+    mt5.cerrar_por_sl(mt5.posiciones[0])     # entra y sale antes de que el bot lo vea
+    tb.ciclo(bundle, estado)
+    assert estado["pendiente"] is None       # consta como ejecutada en el historial
+
+
+def test_sin_respuesta_y_sin_rastro_bloquea_hasta_el_plazo(mt5, bundle, monkeypatch):
+    estado = nuevo_estado(mt5)
+    mt5.respuestas, mt5.modo_incierto = [SIN_RESPUESTA], "nada"
+    tb.ciclo(bundle, estado)
+    assert estado["pendiente"]["orden"] is None
+    monkeypatch.setattr(config, "PENDIENTE_SIN_RASTRO_S", None)   # sin plazo: hace falta resolverlo a mano
+    mt5.avanzar_vela()
+    tb.ciclo(bundle, estado)
+    assert len(aperturas(mt5)) == 1
+    monkeypatch.setattr(config, "PENDIENTE_SIN_RASTRO_S", 0)      # plazo vencido sin rastro: se da por no enviada
+    mt5.avanzar_vela()
+    tb.ciclo(bundle, estado)
+    assert estado.get("pendiente") is None and len(aperturas(mt5)) == 2
+
+
+def test_pendiente_sobrevive_a_un_reinicio(mt5, bundle):
+    estado = nuevo_estado(mt5)
+    mt5.respuestas, mt5.modo_incierto = [PLACED], "coloca"
+    tb.ciclo(bundle, estado)
+    assert json.loads(config.ESTADO_PATH.read_text())["pendiente"]["orden"] == mt5.ordenes[0].ticket
+    reiniciado = {**nuevo_estado(mt5), **tb.cargar_estado()}
+    mt5.avanzar_vela()
+    tb.ciclo(bundle, reiniciado)
+    assert len(aperturas(mt5)) == 1
+
+
+def test_orden_activa_ajena_a_la_pendiente_tambien_bloquea(mt5, bundle):
+    from types import SimpleNamespace
+    mt5.ordenes.append(SimpleNamespace(ticket=1, time_setup=0, state=tb.mt5.ORDER_STATE_PLACED,
+                                       magic=config.MAGIC_NUMBER, symbol=config.SYMBOL, request=None))
+    estado = nuevo_estado(mt5)
+    tb.ciclo(bundle, estado)
+    assert aperturas(mt5) == [] and "colocada" in tb.motivo_sin_entradas(estado, mt5.cuenta)
+
+
+def test_cierre_colocado_no_se_duplica(mt5, bundle):
+    estado = nuevo_estado(mt5)
+    mt5.abrir_posicion()
+    mt5.avanzar_vela(config.MAX_BARS_EN_TRADE)
+    mt5.respuestas, mt5.modo_incierto = [PLACED], "coloca"
+    tb.ciclo(bundle, estado)
+    tb.ciclo(bundle, estado)                 # el cierre sigue colocado: no se envía otro
+    assert len(cierres(mt5)) == 1
+    mt5.ejecutar_colocadas()
+    tb.ciclo(bundle, estado)
+    assert mt5.posiciones == [] and len(cierres(mt5)) == 1
 
 
 # ---------------- cuenta ----------------

@@ -25,6 +25,9 @@ ACCOUNT_TRADE_MODE_REAL = getattr(mt5, "ACCOUNT_TRADE_MODE_REAL", 2)
 FLAG_FILLING_FOK, FLAG_FILLING_IOC = 1, 2  # bits de symbol_info.filling_mode
 RETCODES_EJECUTADA = {mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_DONE_PARTIAL}
 RETCODES_INCIERTOS = {mt5.TRADE_RETCODE_PLACED, mt5.TRADE_RETCODE_TIMEOUT, mt5.TRADE_RETCODE_CONNECTION}
+ESTADOS_ORDEN_EJECUTADA = {mt5.ORDER_STATE_FILLED, mt5.ORDER_STATE_PARTIAL}
+ESTADOS_ORDEN_DESCARTADA = {mt5.ORDER_STATE_CANCELED, mt5.ORDER_STATE_REJECTED, mt5.ORDER_STATE_EXPIRED}
+EJECUTADA, RECHAZADA, INCIERTA = "ejecutada", "rechazada", "incierta"  # resultados de enviar()
 CAMPOS_OPERACIONES = ["fecha", "evento", "ticket", "tipo", "volumen_pedido", "volumen", "precio_pedido", "precio",
                       "slippage_puntos", "spread_puntos", "sl", "tp", "retcode", "comentario",
                       "beneficio", "swap", "comision"]
@@ -153,6 +156,26 @@ def posicion_abierta():
     return propias[0] if propias else None
 
 
+def ordenes_activas_del_bot() -> list:
+    """Órdenes del bot colocadas en el servidor y todavía sin ejecutar ni cancelar."""
+    ordenes = mt5.orders_get(symbol=config.SYMBOL)
+    if ordenes is None:
+        raise RuntimeError(f"orders_get falló: {mt5.last_error()}")
+    return [o for o in ordenes if o.magic == config.MAGIC_NUMBER]
+
+
+def historial_ordenes_del_bot() -> list:
+    """Órdenes del bot de los últimos 7 días ya terminadas (ejecutadas, canceladas, rechazadas o expiradas).
+
+    Justo después de conectar, el historial puede llegar incompleto: que una orden no aparezca no prueba nada.
+    """
+    ahora = datetime.now(timezone.utc)
+    ordenes = mt5.history_orders_get(ahora - timedelta(days=7), ahora + timedelta(days=2))
+    if ordenes is None:
+        raise RuntimeError(f"history_orders_get falló: {mt5.last_error()}")
+    return [o for o in ordenes if o.magic == config.MAGIC_NUMBER and o.symbol == config.SYMBOL]
+
+
 def velas_en_trade(pos) -> int:
     """Velas cerradas que terminan después de la apertura (hora del servidor en ambos lados)."""
     cerradas = mt5_utils.descargar_velas(1, config.MAX_BARS_EN_TRADE + 5)
@@ -216,19 +239,20 @@ def _fila_orden(request: dict, result, descripcion: str) -> dict:
     }
 
 
-def enviar(request: dict, descripcion: str, confirmar) -> bool:
-    """order_check + order_send, sin reintentos.
+def enviar(request: dict, descripcion: str, confirmar) -> tuple:
+    """order_check + order_send, sin reintentos. Devuelve (EJECUTADA | RECHAZADA | INCIERTA, result).
 
     DONE y DONE_PARTIAL cuentan como ejecutadas (una parcial se avisa en el log). Si el resultado es incierto
-    (sin respuesta, PLACED, TIMEOUT o CONNECTION) se reconcilia con `confirmar()`, que mira las posiciones.
+    (sin respuesta, PLACED, TIMEOUT o CONNECTION) se mira `confirmar()`, que comprueba las posiciones. Si aún
+    no se confirma, queda INCIERTA: que no haya posición todavía no significa que la orden no vaya a ejecutarse.
     """
     check = mt5.order_check(request)
     if check is None:
         log.error("%s: order_check devolvió None: %s", descripcion, mt5.last_error())
-        return False
+        return RECHAZADA, None
     if check.retcode != 0:
         log.error("%s rechazada por order_check: retcode=%s comment=%s", descripcion, check.retcode, check.comment)
-        return False
+        return RECHAZADA, None
     result = mt5.order_send(request)
     retcode = None if result is None else result.retcode
 
@@ -238,7 +262,7 @@ def enviar(request: dict, descripcion: str, confirmar) -> bool:
         else:
             log.info("%s ejecutada: orden=%s volumen=%s precio=%s", descripcion, result.order, result.volume, result.price)
         registrar_operacion(_fila_orden(request, result, descripcion))
-        return True
+        return EJECUTADA, result
 
     if result is None or retcode in RETCODES_INCIERTOS:
         motivo = mt5.last_error() if result is None else f"retcode={retcode} comment={result.comment}"
@@ -247,17 +271,18 @@ def enviar(request: dict, descripcion: str, confirmar) -> bool:
         if confirmar():
             log.info("%s confirmada al reconciliar", descripcion)
             registrar_operacion(_fila_orden(request, result, f"{descripcion} (reconciliada)"))
-            return True
-        log.error("%s no se ejecutó (reconciliado)", descripcion)
-        return False
+            return EJECUTADA, result
+        log.warning("%s sin confirmar todavía; queda pendiente de resolver", descripcion)
+        registrar_operacion(_fila_orden(request, result, f"{descripcion} (pendiente)"))
+        return INCIERTA, result
 
     log.error("%s fallida: retcode=%s comment=%s", descripcion, retcode, result.comment)
     registrar_operacion(_fila_orden(request, result, f"{descripcion} (fallida)"))
-    return False
+    return RECHAZADA, result
 
 
-def abrir(lado: str, atr: float, info, tick, login) -> None:
-    verificar_cuenta(login)
+def abrir(lado: str, atr: float, info, tick, estado: dict) -> None:
+    verificar_cuenta(estado["login"])
     sl_dist = config.SL_MULTIPLICADOR_ATR * atr
     tp_dist = config.TP_MULTIPLICADOR_ATR * atr
     distancia_minima = info.trade_stops_level * info.point + (tick.ask - tick.bid)
@@ -273,7 +298,7 @@ def abrir(lado: str, atr: float, info, tick, login) -> None:
         tipo, precio, sl, tp = mt5.ORDER_TYPE_BUY, tick.ask, tick.ask - sl_dist, tick.ask + tp_dist
     else:
         tipo, precio, sl, tp = mt5.ORDER_TYPE_SELL, tick.bid, tick.bid + sl_dist, tick.bid - tp_dist
-    enviar({
+    resultado, result = enviar({
         "action": mt5.TRADE_ACTION_DEAL,
         "symbol": config.SYMBOL,
         "volume": volumen,
@@ -287,6 +312,47 @@ def abrir(lado: str, atr: float, info, tick, login) -> None:
         "type_time": mt5.ORDER_TIME_GTC,
         "type_filling": modo_llenado(info),
     }, f"Apertura {lado.upper()}", confirmar=lambda: posicion_abierta() is not None)
+    if resultado == INCIERTA:
+        # Se guarda antes de seguir: hasta resolverla no se abre nada más, ni tras un reinicio.
+        estado["pendiente"] = {"orden": getattr(result, "order", 0) or None, "lado": lado,
+                               "enviada_servidor": int(tick.time), "enviada_local": time.time()}
+        guardar_estado(estado)
+
+
+def resolver_pendiente(estado: dict) -> None:
+    """Resuelve una entrada con resultado incierto mirando posiciones, órdenes activas e historial.
+
+    Mientras siga sin resolver no se abren nuevas entradas. Solo se da por no ejecutada con una prueba (la orden
+    consta como cancelada, rechazada o expirada) o si tras PENDIENTE_SIN_RASTRO_S no aparece en ningún sitio.
+    """
+    pendiente = estado.get("pendiente")
+    if not pendiente:
+        return
+    desde = pendiente["enviada_servidor"] - 5
+
+    def es_la_pendiente(orden) -> bool:
+        return orden.ticket == pendiente["orden"] if pendiente["orden"] else orden.time_setup >= desde
+
+    if posicion_abierta() is not None:
+        motivo = "se ejecutó: la posición está abierta"
+    elif any(es_la_pendiente(o) for o in ordenes_activas_del_bot()):
+        return  # sigue colocada en el servidor: esperar
+    else:
+        historial = [o for o in historial_ordenes_del_bot() if es_la_pendiente(o)]
+        entradas = [d for d in deals_del_bot() if d.entry == mt5.DEAL_ENTRY_IN
+                    and (d.order == pendiente["orden"] if pendiente["orden"] else d.time >= desde)]
+        espera = time.time() - pendiente["enviada_local"]
+        if entradas or any(o.state in ESTADOS_ORDEN_EJECUTADA for o in historial):
+            motivo = "se ejecutó y la posición ya se cerró (consta en el historial)"
+        elif historial and all(o.state in ESTADOS_ORDEN_DESCARTADA for o in historial):
+            motivo = "no se ejecutó: la orden consta como cancelada, rechazada o expirada"
+        elif config.PENDIENTE_SIN_RASTRO_S is not None and espera > config.PENDIENTE_SIN_RASTRO_S:
+            motivo = f"sin rastro en posiciones, órdenes ni historial tras {espera:.0f} s; se da por no enviada"
+        else:
+            return
+    log.warning("Entrada pendiente (orden %s) resuelta: %s", pendiente["orden"], motivo)
+    estado["pendiente"] = None
+    guardar_estado(estado)
 
 
 def cerrar(pos, info, login) -> None:
@@ -316,6 +382,8 @@ def gestionar_posicion(pos, info, estado: dict) -> None:
     """Time stop. Se comprueba en cada vuelta del bucle; si un cierre falla se reintenta tras REINTENTO_CIERRE_S."""
     if velas_en_trade(pos) < config.MAX_BARS_EN_TRADE:
         return
+    if ordenes_activas_del_bot():
+        return  # un cierre anterior sigue colocado en el servidor: no se envía otro
     ahora = time.monotonic()
     if ahora - estado.get("ultimo_intento_cierre", -math.inf) < config.REINTENTO_CIERRE_S:
         return
@@ -344,6 +412,9 @@ def registrar_cierres(estado: dict) -> None:
                              "comentario": d.comment, "beneficio": d.profit, "swap": d.swap, "comision": d.commission})
 
 
+CLAVES_PERSISTIDAS = ("equity_max", "pendiente")
+
+
 def cargar_estado() -> dict:
     try:
         return json.loads(config.ESTADO_PATH.read_text(encoding="utf-8"))
@@ -351,16 +422,26 @@ def cargar_estado() -> dict:
         return {}
 
 
+def guardar_estado(estado: dict) -> None:
+    """Persiste lo que debe sobrevivir a un reinicio: el máximo de equity y la entrada pendiente."""
+    config.ESTADO_PATH.parent.mkdir(parents=True, exist_ok=True)
+    datos = {k: estado[k] for k in CLAVES_PERSISTIDAS if k in estado}
+    config.ESTADO_PATH.write_text(json.dumps(datos), encoding="utf-8")
+
+
 def actualizar_equity_max(estado: dict, equity: float) -> None:
     """Máximo de equity de la cuenta, persistido para que el límite de drawdown sobreviva a reinicios."""
     if equity > estado.get("equity_max", -math.inf):
         estado["equity_max"] = equity
-        config.ESTADO_PATH.parent.mkdir(parents=True, exist_ok=True)
-        config.ESTADO_PATH.write_text(json.dumps({"equity_max": equity}), encoding="utf-8")
+        guardar_estado(estado)
 
 
 def motivo_sin_entradas(estado: dict, cuenta):
     """Motivo para no abrir nuevas entradas, o None. La gestión de la posición abierta sigue igual."""
+    if estado.get("pendiente"):
+        return f"entrada pendiente de resolver (orden {estado['pendiente']['orden']})"
+    if ordenes_activas_del_bot():
+        return "hay una orden del bot colocada en el servidor"
     if config.PAUSA_PATH.exists():
         return f"pausa manual (existe {config.PAUSA_PATH})"
     drawdown = (estado["equity_max"] - cuenta.equity) / estado["equity_max"]
@@ -376,7 +457,7 @@ def motivo_sin_entradas(estado: dict, cuenta):
     return None
 
 
-def evaluar_entrada(bundle: dict, info, bar_time: int, login) -> None:
+def evaluar_entrada(bundle: dict, info, bar_time: int, estado: dict) -> None:
     tick = mt5.symbol_info_tick(config.SYMBOL)
     if tick is None:
         raise RuntimeError(f"symbol_info_tick falló: {mt5.last_error()}")
@@ -402,7 +483,7 @@ def evaluar_entrada(bundle: dict, info, bar_time: int, login) -> None:
     log.info("P_long=%.3f P_short=%.3f", p_long, p_short)
     if señal_long == señal_short:
         return
-    abrir("long" if señal_long else "short", float(datos["atr"].iloc[-1]), info, tick, login)
+    abrir("long" if señal_long else "short", float(datos["atr"].iloc[-1]), info, tick, estado)
 
 
 def ciclo(bundle: dict, estado: dict) -> None:
@@ -412,6 +493,7 @@ def ciclo(bundle: dict, estado: dict) -> None:
     if cuenta is None:
         raise RuntimeError(f"account_info falló: {mt5.last_error()}")
     actualizar_equity_max(estado, cuenta.equity)
+    resolver_pendiente(estado)
     info = mt5.symbol_info(config.SYMBOL)
     pos = posicion_abierta()
     if pos is not None:
@@ -433,7 +515,7 @@ def ciclo(bundle: dict, estado: dict) -> None:
     if motivo:
         log.info("Sin nuevas entradas: %s", motivo)
         return
-    evaluar_entrada(bundle, info, bar_time, estado["login"])
+    evaluar_entrada(bundle, info, bar_time, estado)
 
 
 def main() -> None:
