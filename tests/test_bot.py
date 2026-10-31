@@ -346,6 +346,55 @@ def test_limite_de_perdida_diaria(mt5, bundle):
     assert "pérdida del día" in tb.motivo_sin_entradas(estado, mt5.cuenta)
 
 
+def _deal(fake, entry, hace_s, **importes):
+    from types import SimpleNamespace
+    campos = {"profit": 0.0, "swap": 0.0, "commission": 0.0, "fee": 0.0, **importes}
+    return SimpleNamespace(ticket=fake._nuevo_ticket(), order=0, position_id=0, entry=entry, magic=config.MAGIC_NUMBER,
+                           symbol=config.SYMBOL, time=fake.tick.time - hace_s, volume=1.0, price=1.1, comment="",
+                           **campos)
+
+
+ENTRADA, SALIDA = tb.mt5.DEAL_ENTRY_IN, tb.mt5.DEAL_ENTRY_OUT
+
+
+def test_limite_diario_cuenta_las_comisiones_de_entrada(mt5, bundle):
+    """Regresión: solo se sumaban los deals de salida, así que 205 de comisiones de entrada en una cuenta de
+    10.000 (más del 2%) no bloqueaban nuevas entradas."""
+    mt5.avanzar_vela(8)  # 02:00 del servidor: hay horas anteriores del mismo día
+    mt5.deals += [_deal(mt5, ENTRADA, 3600, commission=-102.5), _deal(mt5, ENTRADA, 1800, commission=-102.5)]
+    mt5.cuenta.balance = mt5.cuenta.equity = 9_795.0
+    estado = nuevo_estado(mt5)
+    tb.ciclo(bundle, estado)
+    assert aperturas(mt5) == []
+    assert "pérdida del día de 205.00" in tb.motivo_sin_entradas(estado, mt5.cuenta)
+
+
+def test_limite_diario_suma_swap_y_tasas(mt5):
+    mt5.avanzar_vela(8)
+    mt5.deals.append(_deal(mt5, SALIDA, 3600, profit=-150.0, swap=-20.0, fee=-31.0))  # 201 de 10.000
+    mt5.cuenta.balance = mt5.cuenta.equity = 9_799.0
+    estado = {**nuevo_estado(mt5), "equity_max": 9_799.0}
+    assert "pérdida del día de 201.00" in tb.motivo_sin_entradas(estado, mt5.cuenta)
+    mt5.deals[-1].swap = mt5.deals[-1].fee = 0.0                                      # solo 150: no llega
+    mt5.cuenta.balance = mt5.cuenta.equity = 9_850.0
+    assert tb.motivo_sin_entradas(estado, mt5.cuenta) is None
+
+
+def test_limite_diario_no_cuenta_los_deals_de_ayer(mt5):
+    mt5.avanzar_vela(8)
+    desde_medianoche = mt5.tick.time % 86400
+    mt5.deals.append(_deal(mt5, SALIDA, desde_medianoche + 60, profit=-500.0))
+    mt5.cuenta.balance = mt5.cuenta.equity = 9_500.0
+    assert tb.motivo_sin_entradas({**nuevo_estado(mt5), "equity_max": 9_500.0}, mt5.cuenta) is None
+
+
+def test_limite_diario_incluye_el_flotante(mt5):
+    mt5.avanzar_vela(8)
+    mt5.abrir_posicion().profit = -210.0
+    estado = {**nuevo_estado(mt5), "equity_max": 10_000.0}
+    assert "flotante -210.00" in tb.motivo_sin_entradas(estado, mt5.cuenta)
+
+
 def test_drawdown_bloquea_y_persiste(mt5, bundle):
     estado = nuevo_estado(mt5)
     tb.actualizar_equity_max(estado, 12_000.0)

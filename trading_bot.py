@@ -30,7 +30,7 @@ ESTADOS_ORDEN_DESCARTADA = {mt5.ORDER_STATE_CANCELED, mt5.ORDER_STATE_REJECTED, 
 EJECUTADA, RECHAZADA, INCIERTA = "ejecutada", "rechazada", "incierta"  # resultados de enviar()
 CAMPOS_OPERACIONES = ["fecha", "evento", "ticket", "tipo", "volumen_pedido", "volumen", "precio_pedido", "precio",
                       "slippage_puntos", "spread_puntos", "sl", "tp", "retcode", "comentario",
-                      "beneficio", "swap", "comision"]
+                      "beneficio", "swap", "comision", "tasas"]
 
 
 def configurar_logs() -> None:
@@ -400,16 +400,19 @@ def deals_del_bot() -> list:
     return [d for d in deals if d.magic == config.MAGIC_NUMBER and d.symbol == config.SYMBOL]
 
 
-def registrar_cierres(estado: dict) -> None:
-    """Registra los cierres nuevos (por SL, TP o time stop) con su beneficio, swap y comisión."""
+def registrar_deals(estado: dict) -> None:
+    """Registra los deals nuevos del bot: entradas (con la comisión que se cobre al entrar) y cierres (por SL, TP
+    o time stop) con su beneficio, swap, comisión y tasas."""
     for d in deals_del_bot():
-        if d.entry != mt5.DEAL_ENTRY_OUT or d.ticket in estado["deals_vistos"]:
+        if d.ticket in estado["deals_vistos"]:
             continue
         estado["deals_vistos"].add(d.ticket)
-        log.info("Posición %s cerrada: precio=%s beneficio=%s swap=%s comisión=%s (%s)",
-                 d.position_id, d.price, d.profit, d.swap, d.commission, d.comment)
-        registrar_operacion({"evento": "cierre", "ticket": d.position_id, "volumen": d.volume, "precio": d.price,
-                             "comentario": d.comment, "beneficio": d.profit, "swap": d.swap, "comision": d.commission})
+        evento = "cierre" if d.entry == mt5.DEAL_ENTRY_OUT else "entrada"
+        log.info("Deal de %s, posición %s: precio=%s beneficio=%s swap=%s comisión=%s tasas=%s (%s)", evento,
+                 d.position_id, d.price, d.profit, d.swap, d.commission, getattr(d, "fee", 0.0), d.comment)
+        registrar_operacion({"evento": evento, "ticket": d.position_id, "volumen": d.volume, "precio": d.price,
+                             "comentario": d.comment, "beneficio": d.profit, "swap": d.swap,
+                             "comision": d.commission, "tasas": getattr(d, "fee", 0.0)})
 
 
 CLAVES_PERSISTIDAS = ("equity_max", "pendiente", "last_bar_time")
@@ -449,13 +452,32 @@ def motivo_sin_entradas(estado: dict, cuenta):
     if drawdown >= config.MAX_DRAWDOWN_PCT:
         return (f"drawdown de {drawdown:.1%} desde el máximo de equity {estado['equity_max']:.2f} "
                 f"(límite {config.MAX_DRAWDOWN_PCT:.0%}); para reanudar, revisa y borra {config.ESTADO_PATH}")
-    inicio_dia = mt5.symbol_info_tick(config.SYMBOL).time // 86400 * 86400  # 00:00 del servidor
-    realizado = sum(d.profit + d.swap + d.commission + getattr(d, "fee", 0.0) for d in deals_del_bot()
-                    if d.entry == mt5.DEAL_ENTRY_OUT and d.time >= inicio_dia)
-    base = cuenta.balance - realizado
-    if -realizado >= config.MAX_PERDIDA_DIARIA_PCT * base:
-        return f"pérdida del día de {-realizado:.2f} (límite {config.MAX_PERDIDA_DIARIA_PCT:.0%} de {base:.2f})"
+    realizado, flotante = resultado_del_dia()
+    base = cuenta.balance - realizado  # balance al empezar el día
+    perdida = -(realizado + flotante)
+    if perdida >= config.MAX_PERDIDA_DIARIA_PCT * base:
+        return (f"pérdida del día de {perdida:.2f} (límite {config.MAX_PERDIDA_DIARIA_PCT:.0%} de {base:.2f}; "
+                f"realizado {realizado:.2f}, flotante {flotante:.2f})")
     return None
+
+
+def importe_deal(d) -> float:
+    """Todo lo que un deal mueve en el balance: beneficio, swap, comisión y tasas."""
+    return d.profit + d.swap + d.commission + getattr(d, "fee", 0.0)
+
+
+def resultado_del_dia() -> tuple:
+    """(realizado, flotante) del bot desde las 00:00 del servidor.
+
+    El realizado suma **todos** los deals del bot del día, de entrada y de salida: muchos brokers cobran la
+    comisión al entrar. El flotante es el de sus posiciones abiertas. Los cargos de la cuenta que no llevan el
+    magic del bot (comisiones mensuales, por ejemplo) no se le pueden atribuir; el límite de drawdown, que mira
+    la equity de toda la cuenta, sí los cubre.
+    """
+    inicio_dia = mt5.symbol_info_tick(config.SYMBOL).time // 86400 * 86400
+    realizado = sum(importe_deal(d) for d in deals_del_bot() if d.time >= inicio_dia)
+    flotante = sum(getattr(p, "profit", 0.0) + getattr(p, "swap", 0.0) for p in posiciones_del_bot())
+    return realizado, flotante
 
 
 def actividad_en_la_vela(bar_time: int) -> bool:
@@ -534,7 +556,7 @@ def ciclo(bundle: dict, estado: dict) -> None:
     estado["last_bar_time"] = bar_time
     guardar_estado(estado)
     try:
-        registrar_cierres(estado)
+        registrar_deals(estado)
     except RuntimeError:
         log.warning("No se pudo leer el historial de deals", exc_info=True)
     if pos is not None:

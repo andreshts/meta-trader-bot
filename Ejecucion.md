@@ -23,7 +23,7 @@ Cada orden enviada por el bot incorpora protección estricta desde su creación 
 | `MAGIC_NUMBER` | `202601` | Identificador único para gestionar solo las órdenes de este bot. |
 | `PERMITIR_CUENTA_REAL` | `False` | El bot se detiene si la cuenta es real (al arrancar, tras reconectar y antes de cada orden), salvo que se active a propósito. |
 | `MAX_LOTES` | `1.0` | Tope de volumen por operación, también con `RIESGO_PCT`. |
-| `MAX_PERDIDA_DIARIA_PCT` | `0.02` | Sin nuevas entradas el resto del día (del servidor) si los cierres del bot de hoy pierden este % del balance. |
+| `MAX_PERDIDA_DIARIA_PCT` | `0.02` | Sin nuevas entradas el resto del día (del servidor) si el bot pierde hoy este % del balance con el que empezó el día. Cuenta todos sus deals del día, de entrada y de salida (beneficio, swap, comisión y tasas), más el flotante de su posición abierta. |
 | `MAX_DRAWDOWN_PCT` | `0.10` | Sin nuevas entradas si la equity cae este % desde su máximo. El máximo se guarda en `logs/estado_bot.json`, así que sobrevive a reinicios; para reanudar hay que revisarlo y borrar el archivo. |
 | `REINTENTO_CIERRE_S` | `10` segundos | Si un cierre por time stop falla, pausa antes del siguiente intento (sin esperar a otra vela). |
 | `ESPERA_RECONCILIACION_S` | `1` segundo | Espera antes de mirar las posiciones cuando `order_send` da un resultado incierto. |
@@ -155,8 +155,8 @@ velas_en_trade = sum(r["time"] + tf_segundos > position.time for r in cerradas)
    * Cualquier otro código es un rechazo. No se reintenta a ciegas: se registran `retcode` y `comment`. Frecuentes: `10004` requote, `10014` volumen inválido, `10016` stops inválidos, `10018` mercado cerrado, `10019` margen insuficiente, `10030` modo de llenado no soportado.
 3. **Cuenta:** se verifica al arrancar, tras cada reconexión y antes de cada orden. Si cambia el login o la cuenta es real sin permiso, el bot se detiene.
 4. **Control de desconexión:** Si se pierde la conexión con el servidor del broker, las órdenes en el mercado siguen protegidas porque el Stop Loss y Take Profit residen en el servidor de MetaTrader, no en la memoria local del script de Python. El **time stop** sí depende del script: se comprueba en cada vuelta, así que si vence durante una desconexión o con el bot parado, la posición se cierra en cuanto vuelve la conexión. El conteo usa `position.time`, de modo que sobrevive a un reinicio.
-5. **Límites de riesgo:** la pausa manual (crear `logs/PAUSA`), la pérdida diaria (`MAX_PERDIDA_DIARIA_PCT`, solo con los cierres del bot) y el drawdown (`MAX_DRAWDOWN_PCT`, sobre la equity de toda la cuenta) bloquean **solo las nuevas entradas**: la posición abierta se sigue gestionando. El volumen nunca supera `MAX_LOTES`. Los límites suponen una cuenta dedicada al bot.
-6. **Registro:** `logs/operaciones.csv` guarda cada orden (precio pedido y ejecutado, deslizamiento en puntos, spread, volumen, retcode) y cada cierre, también los de SL y TP en el servidor, con beneficio, swap y comisión. Sirve para comparar la ejecución real con la simulación.
+5. **Límites de riesgo:** la pausa manual (crear `logs/PAUSA`), la pérdida diaria (`MAX_PERDIDA_DIARIA_PCT`, con todos los deals del bot del día, incluidas las comisiones que se cobran al entrar) y el drawdown (`MAX_DRAWDOWN_PCT`, sobre la equity de toda la cuenta) bloquean **solo las nuevas entradas**: la posición abierta se sigue gestionando. El volumen nunca supera `MAX_LOTES`. Los límites suponen una cuenta dedicada al bot: los cargos de la cuenta sin el magic del bot, como una comisión mensual, no cuentan para la pérdida diaria, pero sí para el drawdown.
+6. **Registro:** `logs/operaciones.csv` guarda cada orden (precio pedido y ejecutado, deslizamiento en puntos, spread, volumen, retcode) y cada deal del bot: las entradas, con la comisión que se cobre al entrar, y los cierres, también los de SL y TP en el servidor, con beneficio, swap, comisión y tasas. Sirve para comparar la ejecución real con la simulación.
 
 ---
 
@@ -168,7 +168,7 @@ velas_en_trade = sum(r["time"] + tf_segundos > position.time for r in cerradas)
   * órdenes PLACED que se ejecutan tarde, se cancelan, o entran y salen por SL antes de que el bot las vea; respuestas perdidas sin rastro; la entrada pendiente tras un reinicio; y cierres colocados que no se duplican;
   * reinicios dentro de la misma vela, con y sin el estado guardado, sin repetir la entrada;
   * cambio de cuenta tras reconectar, cuenta real e instancia única;
-  * pausa, pérdida diaria, drawdown persistido y el registro de operaciones.
+  * pausa, pérdida diaria (comisiones de entrada, swap, tasas, flotante y deals de ayer), drawdown persistido y el registro de operaciones.
 
   `tests/test_modelo.py` cubre features, etiquetado (costes, swap, time stop), walk-forward, holdout y el pipeline completo con una señal plantada y con ruido.
 * **Antes de dinero real:** varias semanas en Demo, comparando `logs/operaciones.csv` (deslizamiento, spread y swap reales) con lo que supone el backtest.
