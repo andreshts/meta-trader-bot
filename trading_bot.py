@@ -712,16 +712,34 @@ def ciclo(bundle: dict, estado: dict) -> None:
     evaluar_entrada(bundle, info, bar_time, estado)
 
 
+def inicializar_ultima_vela(estado: dict) -> None:
+    """En el primer arranque (sin vela guardada) no se evalúa la vela que ya estaba abierta.
+
+    El control de retraso compara con el último tick, y con el mercado cerrado ese tick es tan viejo como la
+    vela: sin esto, arrancar en fin de semana tomaría la última vela del viernes por una vela nueva.
+    """
+    if estado.get("last_bar_time") is None:
+        estado["last_bar_time"] = int(mt5_utils.descargar_velas(0, 1)["time"].iloc[0])
+        guardar_estado(estado)
+        log.info("Primer arranque: la vela abierta (%s) no se evalúa; se espera a la siguiente", estado["last_bar_time"])
+
+
 def main() -> None:
     configurar_logs()
     with InstanciaUnica(config.LOCK_PATH):
         bundle = cargar_modelo()
+        if not config.EXIGIR_VENTAJA_SIGNIFICATIVA:
+            log.warning("EXIGIR_VENTAJA_SIGNIFICATIVA = False: el modelo no ha demostrado ventaja. Solo para probar "
+                        "la mecánica en una cuenta Demo")
         if not mt5_utils.conectar():
             raise SystemExit(f"No se pudo conectar con MT5: {mt5.last_error()}")
         try:
             estado = {"login": verificar_cuenta(), "last_bar_time": None, **cargar_estado()}
             esperar_historial()
             estado["deals_vistos"] = {d.ticket for d in deals_del_bot()}
+            cuenta = mt5.account_info()
+            actualizar_equity_max(estado, cuenta.equity)
+            inicializar_ultima_vela(estado)
             if not mt5.terminal_info().trade_allowed:
                 log.warning("El trading algorítmico está desactivado en la terminal (botón Algo Trading)")
             log.info("Bot iniciado: %s %s, cuenta %s, umbral_long=%s umbral_short=%s (modelo del %s)",

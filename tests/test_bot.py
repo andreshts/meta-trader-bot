@@ -407,6 +407,24 @@ def test_reinicio_sin_estado_guardado_usa_el_historial(mt5, bundle):
     assert "ya operó en esta vela" in caplog_texto(lambda: tb.ciclo(bundle, {**estado, "last_bar_time": None}))
 
 
+def test_primer_arranque_no_evalua_la_vela_ya_abierta(mt5, bundle):
+    """Con el mercado cerrado el último tick es tan viejo como la vela: sin esto, arrancar en fin de semana
+    tomaba la última vela del viernes por una vela nueva e intentaba operar."""
+    estado = {**nuevo_estado(mt5), "equity_max": 10_000.0}
+    tb.inicializar_ultima_vela(estado)
+    tb.ciclo(bundle, estado)
+    assert aperturas(mt5) == [] and json.loads(config.ESTADO_PATH.read_text())["last_bar_time"] == mt5.bar_time
+    mt5.avanzar_vela()
+    tb.ciclo(bundle, estado)                       # la siguiente vela sí se evalúa
+    assert len(aperturas(mt5)) == 1
+
+
+def test_arranque_con_vela_guardada_la_respeta(mt5):
+    estado = {**nuevo_estado(mt5), "last_bar_time": 123}
+    tb.inicializar_ultima_vela(estado)
+    assert estado["last_bar_time"] == 123
+
+
 def test_la_ultima_vela_procesada_se_persiste(mt5, bundle):
     tb.ciclo(bundle, nuevo_estado(mt5))
     assert json.loads(config.ESTADO_PATH.read_text())["last_bar_time"] == mt5.bar_time
