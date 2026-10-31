@@ -27,6 +27,8 @@ class FakeMT5:
         # servidor hasta ejecutar_colocadas() o cancelar_colocadas()) o "nada" (nunca llegó al servidor).
         self.modo_incierto = "nada"
         self.fraccion_parcial = 0.5
+        # Defectos de los datos: velas cerradas atrasadas (segundos), tope de velas devueltas, velas que faltan.
+        self.atraso_cerradas_s, self.max_velas, self.velas_que_faltan = 0, None, set()
         self._ticket = 5000
 
     def __getattr__(self, nombre):
@@ -43,10 +45,23 @@ class FakeMT5:
         self.bar_time += n * config.TIMEFRAME_SEGUNDOS
         self.tick.time = self.bar_time + 5
 
+    def _aperturas(self, ultima: int, cantidad: int) -> np.ndarray:
+        """Aperturas de `cantidad` velas de mercado (sin sábados ni domingos ni `velas_que_faltan`) hasta `ultima`."""
+        tiempos, t = [], ultima
+        while len(tiempos) < cantidad:
+            if ((t // 86400) + 3) % 7 < 5 and t not in self.velas_que_faltan:
+                tiempos.append(t)
+            t -= config.TIMEFRAME_SEGUNDOS
+        return np.array(tiempos[::-1], dtype=np.int64)
+
     def descargar_velas(self, desde_pos: int, cantidad: int) -> pd.DataFrame:
-        """Sustituye a mt5_utils.descargar_velas: desde 0 es la vela en formación, desde 1 las cerradas."""
-        fin = self.bar_time - (desde_pos - 1) * config.TIMEFRAME_SEGUNDOS
-        tiempos = fin - config.TIMEFRAME_SEGUNDOS * np.arange(cantidad, 0, -1)
+        """Sustituye a mt5_utils.descargar_velas: desde 0 incluye la vela en formación, desde 1 solo cerradas."""
+        if self.max_velas is not None:
+            cantidad = min(cantidad, self.max_velas)
+        ultima_cerrada = self._aperturas(self.bar_time - config.TIMEFRAME_SEGUNDOS, 1)[0] - self.atraso_cerradas_s
+        cerradas = self._aperturas(ultima_cerrada, cantidad - 1 if desde_pos == 0 else cantidad)
+        tiempos = np.r_[cerradas, self.bar_time] if desde_pos == 0 else cerradas
+        cantidad = len(tiempos)
         rng = np.random.default_rng(0)
         close = 1.1 + np.cumsum(rng.normal(0, 0.0004, cantidad))
         open_ = np.r_[close[0], close[:-1]]

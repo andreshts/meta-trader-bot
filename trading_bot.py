@@ -614,6 +614,35 @@ def esperar_historial(lecturas: int = 10) -> None:
     log.warning("El historial de MT5 no se estabilizó tras %s lecturas: %s", lecturas, anterior)
 
 
+def es_salto_de_fin_de_semana(anterior: int, siguiente: int) -> bool:
+    """Viernes -> sábado, domingo o lunes, en menos de 3 días (hora del servidor; lunes = 0, como en features)."""
+    dia = lambda t: ((t // 86400) + 3) % 7  # noqa: E731
+    return dia(anterior) == 4 and dia(siguiente) in (5, 6, 0) and siguiente - anterior <= 3 * 86400
+
+
+def velas_para_la_senal(bar_time: int):
+    """(velas cerradas, None) si son las que preceden a la vela `bar_time` que dispara la señal, o (None, motivo).
+
+    Se descargan en una sola consulta la vela en formación y las cerradas anteriores, para que sean coherentes
+    entre sí. Se exige que la vela en formación sea `bar_time`, que haya BUFFER_VELAS cerradas y que las últimas
+    VELAS_CONTIGUAS_MIN sean consecutivas (solo se admite el salto del fin de semana). Un bloque atrasado o a
+    medio sincronizar deja un hueco justo antes de la vela actual y no pasa. Los huecos más antiguos (festivos,
+    cortes de datos) se aceptan, porque el entrenamiento también los tiene.
+    """
+    velas = mt5_utils.descargar_velas(0, config.BUFFER_VELAS + 1)
+    tiempos = velas["time"].to_numpy(dtype=np.int64)
+    if tiempos[-1] != bar_time:
+        return None, f"la vela en formación ({tiempos[-1]}) no es la que disparó la señal ({bar_time})"
+    if len(velas) - 1 < config.BUFFER_VELAS:
+        return None, f"histórico insuficiente: {len(velas) - 1} velas cerradas de {config.BUFFER_VELAS}"
+    recientes = tiempos[-(config.VELAS_CONTIGUAS_MIN + 1):]
+    for anterior, siguiente in zip(recientes[:-1], recientes[1:]):
+        if siguiente - anterior != config.TIMEFRAME_SEGUNDOS and not es_salto_de_fin_de_semana(anterior, siguiente):
+            return None, (f"faltan velas entre {anterior} y {siguiente} (hora del servidor): datos atrasados o "
+                          "incompletos")
+    return velas.iloc[:-1].reset_index(drop=True), None
+
+
 def evaluar_entrada(bundle: dict, info, bar_time: int, estado: dict) -> None:
     tick = mt5.symbol_info_tick(config.SYMBOL)
     if tick is None:
@@ -627,10 +656,15 @@ def evaluar_entrada(bundle: dict, info, bar_time: int, estado: dict) -> None:
         log.warning("Spread de %s puntos > %s; no se opera", spread_puntos, config.MAX_SPREAD_PUNTOS)
         return
 
-    datos = build_features(mt5_utils.descargar_velas(1, config.BUFFER_VELAS), info.point)
+    cerradas, motivo = velas_para_la_senal(bar_time)
+    if cerradas is None:
+        log.warning("Velas no válidas para la señal (%s); no se opera", motivo)
+        return
+    datos = build_features(cerradas, info.point)
     x = datos[bundle["features"]].iloc[[-1]]
-    if x.isna().to_numpy().any():
-        log.warning("Features incompletas en la última vela cerrada; no se opera")
+    atr = float(datos["atr"].iloc[-1])
+    if not np.isfinite(x.to_numpy(dtype=float)).all() or not np.isfinite(atr) or atr <= 0:
+        log.warning("Features no finitas o ATR no válido en la última vela cerrada; no se opera")
         return
 
     p_long = bundle["model_long"].predict_proba(x)[0, 1]
@@ -640,7 +674,7 @@ def evaluar_entrada(bundle: dict, info, bar_time: int, estado: dict) -> None:
     log.info("P_long=%.3f P_short=%.3f", p_long, p_short)
     if señal_long == señal_short:
         return
-    abrir("long" if señal_long else "short", float(datos["atr"].iloc[-1]), info, tick, estado)
+    abrir("long" if señal_long else "short", atr, info, tick, estado)
 
 
 def ciclo(bundle: dict, estado: dict) -> None:

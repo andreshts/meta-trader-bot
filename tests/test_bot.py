@@ -127,6 +127,70 @@ def test_no_entra_si_la_vela_se_detecta_tarde(mt5, bundle):
     assert aperturas(mt5) == []
 
 
+# ---------------- velas para la señal (regresión: entraba con velas cerradas atrasadas) ----------------
+LUNES = 1_793_318_400 + 3 * 86400  # lunes 2026-11-02 00:00 del servidor
+
+
+def test_velas_cerradas_atrasadas_no_entra(mt5, bundle):
+    """Tick y vela actual correctos, pero las velas cerradas llegan una hora atrasadas: antes se entraba."""
+    mt5.atraso_cerradas_s = 3600
+    texto = caplog_texto(lambda: tb.ciclo(bundle, nuevo_estado(mt5)))
+    assert aperturas(mt5) == [] and "faltan velas" in texto
+
+
+def test_tras_el_fin_de_semana_si_entra(mt5, bundle):
+    mt5.bar_time, mt5.tick.time = LUNES, LUNES + 5   # la última cerrada es la del viernes 23:45
+    tb.ciclo(bundle, nuevo_estado(mt5))
+    assert len(aperturas(mt5)) == 1
+
+
+def test_historico_insuficiente_no_entra(mt5, bundle):
+    mt5.max_velas = config.BUFFER_VELAS                # 199 cerradas + la vela en formación
+    texto = caplog_texto(lambda: tb.ciclo(bundle, nuevo_estado(mt5)))
+    assert aperturas(mt5) == [] and "histórico insuficiente" in texto
+
+
+def test_hueco_reciente_no_entra(mt5, bundle):
+    tf = config.TIMEFRAME_SEGUNDOS
+    mt5.velas_que_faltan = {mt5.bar_time - k * tf for k in (5, 6, 7)}   # sincronización a medias
+    tb.ciclo(bundle, nuevo_estado(mt5))
+    assert aperturas(mt5) == []
+
+
+def test_hueco_antiguo_si_entra(mt5, bundle):
+    tf = config.TIMEFRAME_SEGUNDOS
+    mt5.velas_que_faltan = {mt5.bar_time - k * tf for k in range(100, 110)}  # festivo antiguo, como en el histórico
+    tb.ciclo(bundle, nuevo_estado(mt5))
+    assert len(aperturas(mt5)) == 1
+
+
+def test_la_vela_en_formacion_debe_ser_la_de_la_senal(mt5, bundle):
+    estado = {**nuevo_estado(mt5), "equity_max": 10_000.0}
+    tb.evaluar_entrada(bundle, mt5.info, mt5.bar_time - config.TIMEFRAME_SEGUNDOS, estado)   # señal de otra vela
+    assert aperturas(mt5) == []
+
+
+def test_features_no_finitas_no_entra(mt5, bundle, monkeypatch):
+    construir = tb.build_features
+
+    def con_infinito(*args):
+        datos = construir(*args)
+        datos.loc[datos.index[-1], "volume_ratio"] = np.inf
+        return datos
+
+    monkeypatch.setattr(tb, "build_features", con_infinito)
+    tb.ciclo(bundle, nuevo_estado(mt5))
+    assert aperturas(mt5) == []
+
+
+def test_salto_de_fin_de_semana():
+    tf = config.TIMEFRAME_SEGUNDOS
+    viernes_2345 = LUNES - 2 * 86400 - tf
+    assert tb.es_salto_de_fin_de_semana(viernes_2345, LUNES)
+    assert not tb.es_salto_de_fin_de_semana(LUNES - tf * 4, LUNES)            # hueco de una hora el lunes
+    assert not tb.es_salto_de_fin_de_semana(viernes_2345 - 86400, LUNES)      # desde el jueves: demasiado
+
+
 def test_apertura_parcial_cuenta_como_ejecutada(mt5, bundle):
     mt5.respuestas = [PARCIAL]
     tb.ciclo(bundle, nuevo_estado(mt5))

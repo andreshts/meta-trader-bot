@@ -18,6 +18,7 @@ Cada orden enviada por el bot incorpora protección estricta desde su creación 
 | `TP_MULTIPLICADOR_ATR` | `3.0` | Take Profit dinámico (Relación Riesgo/Beneficio 1:2). |
 | `MAX_BARS_EN_TRADE` | `48` velas | Time stop (12 h en M15): cierra la posición a mercado. Igual a la barrera temporal `N` del target. |
 | `MAX_SPREAD_PUNTOS` | `25` puntos | Filtro de spread: no opera si el spread actual supera este límite (noticias/apertura). |
+| `VELAS_CONTIGUAS_MIN` | `60` velas | Las últimas velas cerradas deben ser consecutivas hasta la vela actual (salvo el fin de semana); si no, los datos están atrasados o incompletos y no se entra. |
 | `MAX_RETRASO_ENTRADA_S` | `60` segundos | No entra si la vela nueva se detecta más tarde de esto tras su apertura (arranque, reconexión). |
 | `DESVIACION_SLIPPAGE` | `20` puntos | Tolerancia máxima de deslizamiento de precio en la ejecución. |
 | `MAGIC_NUMBER` | `202601` | Identificador único para gestionar solo las órdenes de este bot. |
@@ -69,7 +70,11 @@ Con `VOLUMEN` fijo, el riesgo en dinero de cada trade cambia con el ATR. Con `RI
 * **Una sola evaluación por vela, también tras un reinicio.** `last_bar_time` se guarda en `logs/estado_bot.json` en cuanto se detecta la vela nueva, antes de evaluar, así que un reinicio dentro de la misma vela no vuelve a evaluarla. Si ese estado se perdió, una segunda comprobación mira el historial: si el bot colocó alguna orden o tuvo algún deal desde la apertura de la vela, no entra. Esto cubre, por ejemplo, una entrada que abrió y cerró por SL en la misma vela. Al arrancar, el bot espera a que el historial deje de cambiar, porque una terminal recién conectada puede estar sincronizándolo todavía.
 * **La gestión de la posición no depende de la vela nueva.** El time stop se comprueba en cada vuelta del bucle, así que un cierre que falla se reintenta a los `REINTENTO_CIERRE_S` segundos, no 15 minutos después. Las entradas sí se evalúan solo una vez, en la apertura de cada vela.
 * **Entrada tardía:** si la vela nueva se detecta con retraso, se compara `symbol_info_tick(symbol).time` (también en hora del servidor) con el `time` de la vela. Si han pasado más de `MAX_RETRASO_ENTRADA_S`, se salta esa vela. Esto cubre el arranque del bot a mitad de vela y las reconexiones.
-* **Features:** se calculan sobre las últimas 200 velas **cerradas** (`copy_rates_from_pos(symbol, tf, 1, 200)`) con la misma `build_features()` del entrenamiento.
+* **Features:** se calculan sobre las últimas 200 velas **cerradas** con la misma `build_features()` del entrenamiento. Antes se comprueba que esas velas corresponden a la vela que dispara la señal; si algo falla, se omite la entrada:
+  * La vela en formación y las 200 cerradas se descargan **en una sola consulta** (`copy_rates_from_pos(symbol, tf, 0, 201)`), para que sean coherentes entre sí.
+  * La vela en formación debe ser la vela nueva detectada (`bar_time`), y debe haber 200 cerradas completas.
+  * Las últimas `VELAS_CONTIGUAS_MIN` (60) velas, incluida la actual, deben ser consecutivas; solo se admite el salto de viernes 23:45 a lunes 00:00. Un bloque atrasado o a medio sincronizar deja un hueco justo antes de la vela actual y no pasa. En la serie real de 4 años hay 209 fines de semana y 22 huecos más (festivos, cortes de datos): tras uno de esos, el bot espera 60 velas (15 h) antes de volver a entrar. Los huecos más antiguos dentro del bloque se aceptan, porque el entrenamiento también los tiene.
+  * Todas las features y el ATR deben ser finitos, y el ATR, positivo.
 
 ---
 
@@ -101,7 +106,9 @@ flowchart TD
     Ordenes -- Sí --> SleepLoop
     Ordenes -- No --> Filtros{"¿Retraso ≤ MAX_RETRASO_ENTRADA_S<br>y spread ≤ MAX_SPREAD_PUNTOS?"}
     Filtros -- No --> SleepLoop
-    Filtros -- Sí --> Predict["200 velas cerradas → build_features()<br>→ predict_proba Long y Short"]
+    Filtros -- Sí --> Velas{"¿Velas cerradas al día, completas<br>y consecutivas hasta la vela actual?"}
+    Velas -- No --> SleepLoop
+    Velas -- Sí --> Predict["build_features() → ¿features finitas?<br>→ predict_proba Long y Short"]
 
     Predict --> EvalSignal{"Comparar con los umbrales<br>del modelo"}
     EvalSignal -- "Solo P_long ≥ umbral_long" --> SendBuy["Verificar cuenta y enviar BUY<br>con SL y TP según ATR"]
@@ -179,6 +186,7 @@ velas_en_trade = sum(r["time"] + tf_segundos > position.time for r in cerradas)
   * órdenes PLACED que se ejecutan tarde, se cancelan, o entran y salen por SL antes de que el bot las vea; respuestas perdidas sin rastro; la entrada pendiente tras un reinicio; y cierres colocados que no se duplican;
   * reinicios dentro de la misma vela, con y sin el estado guardado, sin repetir la entrada;
   * la intención guardada antes de enviar: fallos del CSV con una orden PLACED, excepciones a mitad del envío, rechazos, y la negativa a enviar si la intención no se puede guardar;
+  * velas para la señal: cerradas atrasadas, histórico insuficiente, huecos recientes y antiguos, el salto del fin de semana, una vela en formación distinta de la señal y features no finitas;
   * cambio de cuenta tras reconectar, cuenta real e instancia única;
   * pausa, pérdida diaria (comisiones de entrada, swap, tasas, flotante y deals de ayer), drawdown persistido y el registro de operaciones;
   * estado truncado o con valores inválidos (recuperación desde el respaldo o bloqueo sin sobrescribir), escritura interrumpida a mitad y fallos de disco.

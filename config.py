@@ -22,6 +22,7 @@ TIMEFRAME_SEGUNDOS = {"M5": 300, "M15": 900, "M30": 1800, "H1": 3600, "H4": 1440
 # --- Datos ---
 VELAS_HISTORICO = 99_999  # ~4 años en M15; tope = maxbars de la terminal (100_000) menos la vela en formación
 BUFFER_VELAS = 200        # velas cerradas que se descargan en vivo
+VELAS_CONTIGUAS_MIN = 60  # en vivo, las últimas velas cerradas deben ser consecutivas (salvo fin de semana)
 WARMUP = 100              # filas iniciales descartadas por el suavizado de Wilder (ATR/RSI)
 
 # --- Target / gestión del trade (deben coincidir entre entrenamiento y ejecución) ---
