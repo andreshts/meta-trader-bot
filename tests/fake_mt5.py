@@ -91,6 +91,12 @@ class FakeMT5:
     def history_deals_get(self, _desde, _hasta):
         return tuple(self.deals)
 
+    def history_orders_total(self, _desde, _hasta):
+        return len(self.historial_ordenes)
+
+    def history_deals_total(self, _desde, _hasta):
+        return len(self.deals)
+
     # --- órdenes ---
     def abrir_posicion(self, tipo=None, volumen=0.01, time=None) -> SimpleNamespace:
         pos = SimpleNamespace(ticket=self._nuevo_ticket(), type=_mt5.POSITION_TYPE_BUY if tipo is None else tipo,

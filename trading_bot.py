@@ -412,7 +412,7 @@ def registrar_cierres(estado: dict) -> None:
                              "comentario": d.comment, "beneficio": d.profit, "swap": d.swap, "comision": d.commission})
 
 
-CLAVES_PERSISTIDAS = ("equity_max", "pendiente")
+CLAVES_PERSISTIDAS = ("equity_max", "pendiente", "last_bar_time")
 
 
 def cargar_estado() -> dict:
@@ -423,7 +423,8 @@ def cargar_estado() -> dict:
 
 
 def guardar_estado(estado: dict) -> None:
-    """Persiste lo que debe sobrevivir a un reinicio: el máximo de equity y la entrada pendiente."""
+    """Persiste lo que debe sobrevivir a un reinicio: el máximo de equity, la entrada pendiente y la última
+    vela procesada (para no volver a evaluar entradas en la misma vela tras reiniciar)."""
     config.ESTADO_PATH.parent.mkdir(parents=True, exist_ok=True)
     datos = {k: estado[k] for k in CLAVES_PERSISTIDAS if k in estado}
     config.ESTADO_PATH.write_text(json.dumps(datos), encoding="utf-8")
@@ -455,6 +456,32 @@ def motivo_sin_entradas(estado: dict, cuenta):
     if -realizado >= config.MAX_PERDIDA_DIARIA_PCT * base:
         return f"pérdida del día de {-realizado:.2f} (límite {config.MAX_PERDIDA_DIARIA_PCT:.0%} de {base:.2f})"
     return None
+
+
+def actividad_en_la_vela(bar_time: int) -> bool:
+    """True si el bot ya colocó alguna orden o tuvo algún deal desde la apertura de `bar_time` (hora del servidor).
+
+    Segunda defensa frente a reentrar en la misma vela tras un reinicio, por si se perdió el estado persistido:
+    una entrada que abrió y cerró por SL/TP en esta vela deja su rastro en el historial.
+    """
+    return (any(o.time_setup >= bar_time for o in ordenes_activas_del_bot())
+            or any(o.time_setup >= bar_time for o in historial_ordenes_del_bot())
+            or any(d.time >= bar_time for d in deals_del_bot()))
+
+
+def esperar_historial(lecturas: int = 10) -> None:
+    """Al conectar, la terminal puede estar todavía sincronizando el historial con el servidor y devolverlo
+    incompleto. Se espera a que el número de órdenes y deals deje de cambiar (mitigación, no garantía)."""
+    anterior = None
+    for _ in range(lecturas):
+        ahora = datetime.now(timezone.utc)
+        desde, hasta = ahora - timedelta(days=7), ahora + timedelta(days=2)
+        total = (mt5.history_orders_total(desde, hasta), mt5.history_deals_total(desde, hasta))
+        if total == anterior:
+            return
+        anterior = total
+        time.sleep(1)
+    log.warning("El historial de MT5 no se estabilizó tras %s lecturas: %s", lecturas, anterior)
 
 
 def evaluar_entrada(bundle: dict, info, bar_time: int, estado: dict) -> None:
@@ -502,9 +529,10 @@ def ciclo(bundle: dict, estado: dict) -> None:
     bar_time = int(mt5_utils.descargar_velas(0, 1)["time"].iloc[0])
     if bar_time == estado["last_bar_time"]:
         return
-    # Se marca antes de evaluar: una entrada que falla no se reintenta a mitad de vela (no coincidiría con el
-    # entrenamiento). La gestión de la posición no depende de esto.
+    # Se marca y se persiste antes de evaluar: una entrada que falla no se reintenta a mitad de vela (no
+    # coincidiría con el entrenamiento), tampoco tras un reinicio. La gestión de la posición no depende de esto.
     estado["last_bar_time"] = bar_time
+    guardar_estado(estado)
     try:
         registrar_cierres(estado)
     except RuntimeError:
@@ -512,6 +540,8 @@ def ciclo(bundle: dict, estado: dict) -> None:
     if pos is not None:
         return
     motivo = motivo_sin_entradas(estado, cuenta)
+    if motivo is None and actividad_en_la_vela(bar_time):
+        motivo = "el bot ya operó en esta vela (consta en el historial)"
     if motivo:
         log.info("Sin nuevas entradas: %s", motivo)
         return
@@ -526,6 +556,7 @@ def main() -> None:
             raise SystemExit(f"No se pudo conectar con MT5: {mt5.last_error()}")
         try:
             estado = {"login": verificar_cuenta(), "last_bar_time": None, **cargar_estado()}
+            esperar_historial()
             estado["deals_vistos"] = {d.ticket for d in deals_del_bot()}
             if not mt5.terminal_info().trade_allowed:
                 log.warning("El trading algorítmico está desactivado en la terminal (botón Algo Trading)")

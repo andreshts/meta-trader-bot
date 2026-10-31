@@ -66,6 +66,7 @@ Con `VOLUMEN` fijo, el riesgo en dinero de cada trade cambia con el ATR. Con `RI
 * **Detección de nueva vela:** se lee la vela en formación (`copy_rates_from_pos(symbol, tf, 0, 1)`) y se compara su `time` con `last_bar_time`. Ambos son enteros de la misma fuente, así que la comparación no depende de zonas horarias. Nunca se compara contra el reloj local (`datetime.now()`).
 * **Hora del servidor, no UTC:** `time` está en la hora del servidor del broker (a menudo GMT+2/+3), aunque se lea como un timestamp. No se convierte con `utc=True` ni se mezcla con la hora local.
 * **`last_bar_time` se actualiza en cada vela nueva, haya o no posición abierta.** Si solo se actualizara sin posición, al cerrarse un trade a mitad de vela la siguiente vuelta detectaría una "vela nueva" falsa y entraría a mitad de vela, lo que no coincide con el entrenamiento (entrada en la apertura).
+* **Una sola evaluación por vela, también tras un reinicio.** `last_bar_time` se guarda en `logs/estado_bot.json` en cuanto se detecta la vela nueva, antes de evaluar, así que un reinicio dentro de la misma vela no vuelve a evaluarla. Si ese estado se perdió, una segunda comprobación mira el historial: si el bot colocó alguna orden o tuvo algún deal desde la apertura de la vela, no entra. Esto cubre, por ejemplo, una entrada que abrió y cerró por SL en la misma vela. Al arrancar, el bot espera a que el historial deje de cambiar, porque una terminal recién conectada puede estar sincronizándolo todavía.
 * **La gestión de la posición no depende de la vela nueva.** El time stop se comprueba en cada vuelta del bucle, así que un cierre que falla se reintenta a los `REINTENTO_CIERRE_S` segundos, no 15 minutos después. Las entradas sí se evalúan solo una vez, en la apertura de cada vela.
 * **Entrada tardía:** si la vela nueva se detecta con retraso, se compara `symbol_info_tick(symbol).time` (también en hora del servidor) con el `time` de la vela. Si han pasado más de `MAX_RETRASO_ENTRADA_S`, se salta esa vela. Esto cubre el arranque del bot a mitad de vela y las reconexiones.
 * **Features:** se calculan sobre las últimas 200 velas **cerradas** (`copy_rates_from_pos(symbol, tf, 1, 200)`) con la misma `build_features()` del entrenamiento.
@@ -91,12 +92,12 @@ flowchart TD
     CheckPos -- No --> CheckNewBar{"¿Nueva vela?<br>time != last_bar_time"}
 
     CheckNewBar -- No --> SleepLoop["Dormir 2 s"]
-    CheckNewBar -- Sí --> UpdateBar["last_bar_time = time<br>registrar cierres nuevos"]
+    CheckNewBar -- Sí --> UpdateBar["last_bar_time = time (persistido)<br>registrar cierres nuevos"]
     UpdateBar --> HabiaPos{"¿Había posición<br>en esta vuelta?"}
     HabiaPos -- Sí --> SleepLoop
     HabiaPos -- No --> Limites{"¿Pausa, drawdown o<br>pérdida diaria al límite?"}
     Limites -- Sí --> SleepLoop
-    Limites -- No --> Ordenes{"¿Entrada pendiente u orden<br>del bot colocada?"}
+    Limites -- No --> Ordenes{"¿Entrada pendiente, orden colocada<br>o actividad del bot en esta vela?"}
     Ordenes -- Sí --> SleepLoop
     Ordenes -- No --> Filtros{"¿Retraso ≤ MAX_RETRASO_ENTRADA_S<br>y spread ≤ MAX_SPREAD_PUNTOS?"}
     Filtros -- No --> SleepLoop
@@ -165,6 +166,7 @@ velas_en_trade = sum(r["time"] + tf_segundos > position.time for r in cerradas)
   * cierres rechazados que se reintentan sin esperar otra vela, y el reinicio con una posición vencida;
   * ejecuciones parciales al abrir y al cerrar, y resultados inciertos (ejecutados o no) sin duplicar;
   * órdenes PLACED que se ejecutan tarde, se cancelan, o entran y salen por SL antes de que el bot las vea; respuestas perdidas sin rastro; la entrada pendiente tras un reinicio; y cierres colocados que no se duplican;
+  * reinicios dentro de la misma vela, con y sin el estado guardado, sin repetir la entrada;
   * cambio de cuenta tras reconectar, cuenta real e instancia única;
   * pausa, pérdida diaria, drawdown persistido y el registro de operaciones.
 

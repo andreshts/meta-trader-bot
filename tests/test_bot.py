@@ -239,6 +239,58 @@ def test_cierre_colocado_no_se_duplica(mt5, bundle):
     assert mt5.posiciones == [] and len(cierres(mt5)) == 1
 
 
+# ---------------- reinicio dentro de la misma vela (regresión) ----------------
+def test_reinicio_en_la_misma_vela_no_repite_la_entrada(mt5, bundle):
+    """Entra y sale por SL en la vela; reiniciar dentro del minuto permitido repetía la señal."""
+    tb.ciclo(bundle, nuevo_estado(mt5))
+    mt5.cerrar_por_sl(mt5.posiciones[0])
+    reiniciado = {**nuevo_estado(mt5), **tb.cargar_estado()}
+    tb.ciclo(bundle, reiniciado)
+    assert len(aperturas(mt5)) == 1
+    mt5.avanzar_vela()
+    tb.ciclo(bundle, reiniciado)                    # la vela siguiente sí se evalúa
+    assert len(aperturas(mt5)) == 2
+
+
+def test_reinicio_sin_estado_guardado_usa_el_historial(mt5, bundle):
+    tb.ciclo(bundle, nuevo_estado(mt5))
+    mt5.cerrar_por_sl(mt5.posiciones[0])
+    config.ESTADO_PATH.unlink()                     # el estado se perdió
+    estado = {**nuevo_estado(mt5), **tb.cargar_estado()}
+    tb.ciclo(bundle, estado)
+    assert len(aperturas(mt5)) == 1
+    assert "ya operó en esta vela" in caplog_texto(lambda: tb.ciclo(bundle, {**estado, "last_bar_time": None}))
+
+
+def test_la_ultima_vela_procesada_se_persiste(mt5, bundle):
+    tb.ciclo(bundle, nuevo_estado(mt5))
+    assert json.loads(config.ESTADO_PATH.read_text())["last_bar_time"] == mt5.bar_time
+
+
+def test_tras_el_time_stop_no_se_entra_en_la_misma_vela_aunque_se_reinicie(mt5, bundle):
+    estado = nuevo_estado(mt5)
+    mt5.abrir_posicion()
+    mt5.avanzar_vela(config.MAX_BARS_EN_TRADE)
+    tb.ciclo(bundle, estado)                        # cierre por time stop en la apertura de la vela
+    config.ESTADO_PATH.unlink()
+    tb.ciclo(bundle, nuevo_estado(mt5))             # reinicio sin estado en la misma vela
+    assert aperturas(mt5) == []                     # como en el backtest: la siguiente señal es la de la vela siguiente
+
+
+def caplog_texto(accion) -> str:
+    import logging
+    registros = []
+    manejador = logging.Handler()
+    manejador.emit = lambda r: registros.append(r.getMessage())
+    tb.log.addHandler(manejador)
+    tb.log.setLevel(logging.INFO)
+    try:
+        accion()
+    finally:
+        tb.log.removeHandler(manejador)
+    return "\n".join(registros)
+
+
 # ---------------- cuenta ----------------
 def test_cambio_de_cuenta_tras_reconectar_detiene(mt5, bundle):
     mt5.conectado, mt5.login_tras_reconectar = False, 2002
