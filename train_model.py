@@ -469,11 +469,14 @@ def main() -> None:
         raise SystemExit(f"No se pudo conectar con MT5: {mt5.last_error()}")
     try:
         info = mt5.symbol_info(config.SYMBOL)
-        velas = mt5_utils.descargar_cerradas_al_dia(config.VELAS_HISTORICO)
+        velas = mt5_utils.descargar_cerradas_desde(config.HISTORICO_DESDE)
+    except RuntimeError as e:
+        raise SystemExit(str(e))
     finally:
         mt5.shutdown()
     costes = costes_de_simbolo(info)
-    print(f"{len(velas)} velas cerradas de {config.SYMBOL} {config.TIMEFRAME} | costes: comisión "
+    print(f"{len(velas)} velas cerradas de {config.SYMBOL} {config.TIMEFRAME} "
+          f"({fecha(velas['time'].iloc[0])} -> {fecha(velas['time'].iloc[-1])}) | costes: comisión "
           f"{config.COMISION_PUNTOS} pts, deslizamiento {config.SLIPPAGE_PUNTOS} pts por ejecución, swap long/short "
           f"{costes['swap_long_puntos']}/{costes['swap_short_puntos']} pts por noche, stops_level {costes['stops_level']}")
 

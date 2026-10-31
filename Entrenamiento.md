@@ -9,9 +9,12 @@ Este documento describe la metodología de preparación de datos, la ingeniería
 Los datos son extraídos directamente desde la terminal de **MetaTrader 5** mediante la API de Python (`mt5.copy_rates_from_pos`).
 
 * **Temporalidad recomendada (Timeframe):** M15 o H1 (evita el ruido excesivo de M1/M5 y reduce el impacto relativo del spread).
-* **Ventana de datos históricos:** 99,999 velas para entrenamiento (~4 años en M15; el tope es el `maxbars` de la terminal, 100,000, menos la vela en formación) y un búfer de mínimo **200 velas cerradas** para el cálculo de indicadores en vivo.
+* **Ventana de datos históricos:** todas las velas cerradas desde `HISTORICO_DESDE = "2010-01-01"` (unas 415.000 velas M15), más un búfer de mínimo **200 velas cerradas** para el cálculo de indicadores en vivo.
+  * **Inicio fijo:** cada reentrenamiento usa el mismo inicio. Antes se pedían "las últimas 99.999 velas", y la ventana avanzaba con cada vela nueva: desplazarla 92 velas llegó a mover el `t` del walk-forward en más de 3 puntos.
+  * **Por qué 2010:** antes de 2009 el spread de las velas es un valor fijo por año (50 → 20 puntos) y el volumen de ticks viene de otra fuente.
+  * **Requisito de MT5:** "Máx. barras en la ventana" en *Ilimitado* (Herramientas → Opciones → Gráficos) y reiniciar MT5. Con un límite, la terminal recorta el histórico y `descargar_cerradas_desde()` se detiene con ese aviso.
 * **Solo velas cerradas:** Se descarga desde la posición `1` (`copy_rates_from_pos(symbol, tf, 1, n)`). La posición `0` es la vela en formación y nunca entra en el cálculo de features.
-* **Velas al día:** justo después de conectar, la terminal puede devolver solo las velas que tenía en caché y completar el resto en segundo plano. Pasó en la práctica: un entrenamiento del 31 de octubre recibió velas solo hasta el día 29 y dejó el holdout vacío. `train_model.py` usa `descargar_cerradas_al_dia()`, que repite la descarga hasta que la última vela cerrada llega al último tick, y se detiene si no lo consigue.
+* **Velas al día:** justo después de conectar, la terminal puede devolver solo las velas que tenía en caché y completar el resto en segundo plano. Pasó en la práctica: un entrenamiento del 31 de octubre recibió velas solo hasta el día 29 y dejó el holdout vacío. `descargar_cerradas_desde()` repite la descarga hasta que la última vela cerrada llega al último tick, y se detiene si no lo consigue.
 * **Hora del servidor:** El campo `time` es un entero (segundos) en la hora del servidor del broker, no en UTC real. Se conserva tal cual; si se añaden filtros de sesión, se expresan en la hora del broker.
 
 ### ⏱️ Convención Temporal (idéntica en entrenamiento y en vivo)
@@ -89,6 +92,16 @@ El ATR de las barreras es el `ATR(14)` al cierre de `t`, el mismo que usa la ord
 > [!NOTE]
 > **Otros mercados:** el mismo pipeline, sin ajustes, en 12 variantes fijadas de antemano (EURUSD, GBPUSD, USDJPY, AUDUSD, XAUUSD y XAGUSD, en M15 y H1). Ninguna tiene ventaja: el mejor `t` es +0.99 (EURUSD M15) y varias pierden de forma significativa (XAGUSD M15 t = −3.52, XAGUSD H1 −2.21, AUDUSD M15 −2.19). La dirección sigue siendo casi impredecible: ROC-AUC 0.495–0.517 en H1 y 0.50–0.56 en M15. En M15 es algo mayor justo en los pares más caros de operar (AUDUSD, GBPUSD), lo que apunta a ruido de microestructura que el spread se come. En H1 el coste baja a la mitad (−0.03 R por trade), pero la dirección vale 0.50.
 >
+> **Prueba independiente en 2010–2022:** con el límite de barras de la terminal en *Ilimitado* (Herramientas → Opciones → Gráficos, y reiniciar MT5), hay 665.438 velas M15 de EURUSD desde 2000. Antes de 2009 el spread es un valor fijo por año (50 → 20 puntos) y el volumen de ticks viene de otra fuente, así que la prueba usa 2010–2022. Ningún experimento en M15 había usado ese periodo. El procedimiento se ejecutó sin cambiar nada (11 features, 1.5/3.0/48, costes, purga, 5 ventanas y 3 semillas) sobre 317.271 velas, con 8 años de test fuera de muestra (2014-10 a 2022-10).
+>
+> | Semilla | Trades | Esperanza | t | Ventanas en positivo |
+> | :--- | ---: | :--- | ---: | ---: |
+> | 42 | 933 | −0.100 R ± 0.045 | **−2.21** | 0% |
+> | 1 | 1.061 | −0.054 R ± 0.043 | −1.25 | 40% |
+> | 2 | 2.085 | −0.009 R ± 0.031 | −0.30 | 60% |
+>
+> Operar sin filtro costaba −0.085 R por trade en ese periodo. El ROC-AUC (0.558 / 0.570) es parecido al de 2022–2026: el modelo ordena algo, pero no lo suficiente para superar el 33.3% más los costes. El +1.4 / +1.7 de `t` en 2022–2026 no se repite en datos que el procedimiento no había visto: era ruido.
+>
 > **Filtro de spread en el backtest:** en XAGUSD M15, un festivo con precio congelado (ATR 0.0023) y spread de 129 puntos produjo un trade de −37 R que el bot en vivo nunca habría abierto. Desde entonces `preparar_datos` quita esas entradas (ver sección 1).
 >
 > **Robustez:** con el filtro, el walk-forward de EURUSD M15 dio +0.088 R ± 0.044 (t = 1.98), justo por debajo del umbral. No se sostiene. Con cambios que no deberían importar (otra descarga de las mismas velas, otra semilla del Random Forest, 4 o 6 ventanas), `t` va de −2.12 a +1.25, con media +0.13. Solo la semilla, con los mismos datos, lo mueve de −0.22 a +0.68. El modelo es inestable y la elección de umbrales amplifica esa inestabilidad. Un resultado aislado cerca de `t = 2` no significa nada sin esta comprobación.
@@ -133,7 +146,7 @@ El resultado `R` de cada trade descuenta:
 > [!WARNING]
 > En series temporales financieras **está estrictamente prohibido usar validación cruzada aleatoria (`train_test_split(shuffle=True)`)**. Mezclar datos del futuro con el pasado produce resultados artificialmente optimistas que fracasan en el mercado real.
 
-Se aplica una **validación walk-forward anclada** (`WF_VENTANAS = 5`). El histórico se divide en `WF_VENTANAS + 3` segmentos iguales (8 segmentos de ~6 meses con 99,999 velas M15) y en cada ventana `k`:
+Se aplica una **validación walk-forward anclada** (`WF_VENTANAS = 5`). El histórico se divide en `WF_VENTANAS + 3` segmentos iguales (8 segmentos de unos 2 años con el histórico desde 2010) y en cada ventana `k`:
 
 | Bloque | Segmentos | Uso |
 | :--- | :--- | :--- |
@@ -141,7 +154,7 @@ Se aplica una **validación walk-forward anclada** (`WF_VENTANAS = 5`). El hist�
 | **Validation** | `k+2` | Calibración de probabilidades y elección de umbrales. |
 | **Test** | `k+3` (la última ventana absorbe el resto) | Fuera de muestra: backtest con los umbrales ya fijados. |
 
-Los 5 tests son consecutivos y no se solapan: juntos cubren los últimos 5/8 del histórico (~2.5 años) y ningún trade se evalúa con un modelo que haya visto esos datos. Un único split puede salir bien por casualidad; el walk-forward mide si el **procedimiento** funciona en periodos distintos.
+Los 5 tests son consecutivos y no se solapan: juntos cubren los últimos 5/8 del histórico (unos 10 años desde 2010) y ningún trade se evalúa con un modelo que haya visto esos datos. Un único split puede salir bien por casualidad; el walk-forward mide si el **procedimiento** funciona en periodos distintos.
 
 El modelo que se guarda es el de la última ventana, entrenado con los datos más recientes.
 
@@ -162,7 +175,7 @@ El walk-forward se ha reutilizado en decenas de experimentos (features, SL/TP, m
 * El modelo guardado, entrenado solo con datos anteriores, se evalúa una vez en el holdout con sus umbrales ya fijados.
 * El bot exige que el holdout también pase: al menos 30 trades y `t >= 2`. Mientras no se acumulen suficientes datos nuevos, el bot no arranca, y es lo correcto.
 * **Mover `HOLDOUT_DESDE` consume el holdout:** los datos que pasan al walk-forward dejan de ser una prueba limpia. Solo debe hacerse después de tomar una decisión con él, y fijando un holdout nuevo hacia delante.
-* Como la descarga son siempre las últimas 99,999 velas, el inicio del walk-forward avanza con el tiempo y sus resultados cambian un poco al reentrenar.
+* Con el inicio fijo (`HISTORICO_DESDE`) y el holdout fijo, el walk-forward usa siempre los mismos datos: reentrenar da el mismo resultado salvo que el broker corrija su histórico.
 
 ---
 

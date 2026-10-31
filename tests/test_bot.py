@@ -687,19 +687,41 @@ def test_registro_de_ordenes_y_cierres(mt5, bundle):
     assert float(cierre["beneficio"]) == -1.5 and float(cierre["swap"]) == -0.1
 
 
-def test_descarga_espera_a_que_la_terminal_sincronice(monkeypatch):
-    """Regresión: al conectar, la terminal devolvió velas en caché hasta el día anterior y el holdout quedó vacío."""
+INICIO_2010 = 1_262_304_000  # 2010-01-01 00:00
+
+
+def _mt5_de_rangos(monkeypatch, respuestas, en_formacion, tick_time):
+    """mt5_utils con un MT5 mínimo: copy_rates_range devuelve, en orden, las listas de `time` de `respuestas`."""
     from types import SimpleNamespace
     import pandas as pd
+    fake = SimpleNamespace(copy_rates_range=lambda *a: [{"time": t} for t in respuestas.pop(0)],
+                           symbol_info_tick=lambda _s: SimpleNamespace(time=tick_time), last_error=lambda: (1, ""))
+    monkeypatch.setattr(mt5_utils, "mt5", fake)
+    monkeypatch.setattr(mt5_utils, "descargar_velas", lambda desde, cantidad: pd.DataFrame({"time": [en_formacion]}))
+
+
+def test_descarga_desde_fecha_espera_a_que_la_terminal_sincronice(monkeypatch):
+    """Regresión: al conectar, la terminal devolvió velas en caché hasta el día anterior y el holdout quedó vacío."""
     tf = config.TIMEFRAME_SEGUNDOS
-    tick = SimpleNamespace(time=10_000 * tf + 5)
-    respuestas = [pd.DataFrame({"time": [9_000 * tf]}), pd.DataFrame({"time": [9_999 * tf]})]  # en caché, al día
-    monkeypatch.setattr(mt5_utils, "mt5", SimpleNamespace(symbol_info_tick=lambda _s: tick))
-    monkeypatch.setattr(mt5_utils, "descargar_velas", lambda desde, cantidad: respuestas.pop(0))
-    assert mt5_utils.descargar_cerradas_al_dia(10, espera_s=0)["time"].iloc[-1] == 9_999 * tf
-    monkeypatch.setattr(mt5_utils, "descargar_velas", lambda desde, cantidad: pd.DataFrame({"time": [9_000 * tf]}))
+    lunes = INICIO_2010 + 3 * 86400
+    ahora = lunes + 10_000 * tf
+    en_cache = [lunes + k * tf for k in range(9_000)]
+    al_dia = [lunes + k * tf for k in range(10_001)]               # incluye la vela en formación
+    _mt5_de_rangos(monkeypatch, [en_cache, al_dia], en_formacion=ahora, tick_time=ahora + 5)
+    velas = mt5_utils.descargar_cerradas_desde("2010-01-01", espera_s=0)
+    assert velas["time"].iloc[0] == lunes and velas["time"].iloc[-1] == ahora - tf   # sin la vela en formación
+    _mt5_de_rangos(monkeypatch, [en_cache] * 3, en_formacion=ahora, tick_time=ahora + 5)
     with pytest.raises(RuntimeError, match="no se sincronizaron"):
-        mt5_utils.descargar_cerradas_al_dia(10, intentos=3, espera_s=0)
+        mt5_utils.descargar_cerradas_desde("2010-01-01", intentos=3, espera_s=0)
+
+
+def test_descarga_desde_fecha_detecta_el_limite_de_barras(monkeypatch):
+    tf = config.TIMEFRAME_SEGUNDOS
+    ahora = INICIO_2010 + 400 * 86400
+    recortado = [ahora - k * tf for k in range(100, 0, -1)] + [ahora]   # empieza un año después de lo pedido
+    _mt5_de_rangos(monkeypatch, [recortado], en_formacion=ahora, tick_time=ahora + 5)
+    with pytest.raises(RuntimeError, match="Ilimitado"):
+        mt5_utils.descargar_cerradas_desde("2010-01-01", espera_s=0)
 
 
 def test_velas_en_trade(mt5):
