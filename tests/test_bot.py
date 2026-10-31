@@ -217,6 +217,87 @@ def test_pendiente_sobrevive_a_un_reinicio(mt5, bundle):
     assert len(aperturas(mt5)) == 1
 
 
+def _falla_csv(*_):
+    raise OSError("disco lleno")
+
+
+def test_fallo_del_csv_no_impide_registrar_la_pendiente(mt5, bundle, monkeypatch):
+    """Regresión: con PLACED y un error al escribir el CSV, la excepción salía antes de guardar la pendiente y
+    quedaba una orden activa en el servidor sin constancia en memoria ni en disco."""
+    monkeypatch.setattr(tb, "registrar_operacion", _falla_csv)
+    estado = nuevo_estado(mt5)
+    mt5.respuestas, mt5.modo_incierto = [PLACED], "coloca"
+    tb.ciclo(bundle, estado)                                   # no lanza: el CSV no interrumpe nada
+    orden = mt5.ordenes[0].ticket
+    assert estado["pendiente"]["orden"] == orden
+    assert json.loads(config.ESTADO_PATH.read_text())["pendiente"]["orden"] == orden
+    mt5.ordenes.clear()                                        # aunque la orden deje de verse como activa...
+    reiniciado = {**nuevo_estado(mt5), **tb.cargar_estado()}
+    mt5.avanzar_vela()
+    tb.ciclo(bundle, reiniciado)                               # ...tras reiniciar sigue bloqueado
+    assert len(aperturas(mt5)) == 1
+
+
+def test_la_intencion_se_guarda_antes_de_enviar(mt5, bundle):
+    en_disco = []
+    enviar = mt5.order_send
+
+    def espia(request):
+        en_disco.append(json.loads(config.ESTADO_PATH.read_text()).get("pendiente"))
+        return enviar(request)
+
+    mt5.order_send = espia
+    estado = nuevo_estado(mt5)
+    tb.ciclo(bundle, estado)
+    assert en_disco[0] is not None and en_disco[0]["orden"] is None and en_disco[0]["lado"] == "long"
+    assert estado["pendiente"] is None                         # DONE: ya no está pendiente
+    assert json.loads(config.ESTADO_PATH.read_text())["pendiente"] is None
+
+
+def test_excepcion_al_enviar_deja_la_intencion_guardada(mt5, bundle, monkeypatch):
+    def revienta(_request):
+        raise RuntimeError("fallo inesperado a mitad del envío")
+
+    mt5.order_send = revienta
+    estado = nuevo_estado(mt5)
+    with pytest.raises(RuntimeError):
+        tb.ciclo(bundle, estado)
+    pendiente = json.loads(config.ESTADO_PATH.read_text())["pendiente"]
+    assert pendiente is not None and pendiente["orden"] is None
+    reiniciado = {**nuevo_estado(mt5), **tb.cargar_estado()}
+    mt5.order_send = FakeMT5.order_send.__get__(mt5)
+    mt5.avanzar_vela()
+    tb.ciclo(bundle, reiniciado)
+    assert mt5.enviadas == []                                  # sin rastro todavía: no se envía otra
+    monkeypatch.setattr(config, "PENDIENTE_SIN_RASTRO_S", 0)   # vencido el plazo sin rastro, se libera
+    mt5.avanzar_vela()
+    tb.ciclo(bundle, reiniciado)
+    assert len(aperturas(mt5)) == 1
+
+
+def test_rechazo_limpia_la_intencion(mt5, bundle):
+    mt5.respuestas = [RECHAZO]
+    estado = nuevo_estado(mt5)
+    tb.ciclo(bundle, estado)
+    assert estado["pendiente"] is None and json.loads(config.ESTADO_PATH.read_text())["pendiente"] is None
+
+
+def test_no_envia_si_no_puede_guardar_la_intencion(mt5, monkeypatch):
+    estado = {**nuevo_estado(mt5), "equity_max": 10_000.0}
+    monkeypatch.setattr(tb.os, "replace", lambda *_: (_ for _ in ()).throw(PermissionError("antivirus")))
+    tb.abrir("long", 0.0006, mt5.info, mt5.tick, estado)
+    assert mt5.enviadas == [] and "error_estado" in estado
+
+
+def test_fallo_del_csv_no_rompe_el_registro_de_deals(mt5, bundle, monkeypatch):
+    monkeypatch.setattr(tb, "registrar_operacion", _falla_csv)
+    estado = nuevo_estado(mt5)
+    tb.ciclo(bundle, estado)
+    mt5.avanzar_vela(config.MAX_BARS_EN_TRADE)
+    tb.ciclo(bundle, estado)                                   # cierre por time stop + registro de deals
+    assert mt5.posiciones == [] and len(cierres(mt5)) == 1
+
+
 def test_orden_activa_ajena_a_la_pendiente_tambien_bloquea(mt5, bundle):
     from types import SimpleNamespace
     mt5.ordenes.append(SimpleNamespace(ticket=1, time_setup=0, state=tb.mt5.ORDER_STATE_PLACED,

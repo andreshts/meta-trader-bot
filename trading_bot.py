@@ -215,6 +215,18 @@ def registrar_operacion(fila: dict) -> None:
         escritor.writerow({"fecha": datetime.now().isoformat(timespec="seconds"), **fila})
 
 
+def anotar(fila) -> None:
+    """Registro de auditoría que nunca interrumpe el flujo de órdenes ni su reconciliación.
+
+    `fila` es el dict o una función que lo construye (así también se capturan los fallos al construirlo). Si
+    algo falla (disco, permisos, un dato inesperado), se avisa en el log y se sigue.
+    """
+    try:
+        registrar_operacion(fila() if callable(fila) else fila)
+    except Exception:
+        log.exception("No se pudo escribir en %s; la operación sigue su curso", config.OPERACIONES_PATH)
+
+
 def _fila_orden(request: dict, result, descripcion: str) -> dict:
     info, tick = mt5.symbol_info(config.SYMBOL), mt5.symbol_info_tick(config.SYMBOL)
     compra = request["type"] == mt5.ORDER_TYPE_BUY
@@ -261,7 +273,7 @@ def enviar(request: dict, descripcion: str, confirmar) -> tuple:
             log.warning("%s ejecutada PARCIALMENTE: volumen=%s de %s", descripcion, result.volume, request["volume"])
         else:
             log.info("%s ejecutada: orden=%s volumen=%s precio=%s", descripcion, result.order, result.volume, result.price)
-        registrar_operacion(_fila_orden(request, result, descripcion))
+        anotar(lambda: _fila_orden(request, result, descripcion))
         return EJECUTADA, result
 
     if result is None or retcode in RETCODES_INCIERTOS:
@@ -270,14 +282,14 @@ def enviar(request: dict, descripcion: str, confirmar) -> tuple:
         time.sleep(config.ESPERA_RECONCILIACION_S)
         if confirmar():
             log.info("%s confirmada al reconciliar", descripcion)
-            registrar_operacion(_fila_orden(request, result, f"{descripcion} (reconciliada)"))
+            anotar(lambda: _fila_orden(request, result, f"{descripcion} (reconciliada)"))
             return EJECUTADA, result
         log.warning("%s sin confirmar todavía; queda pendiente de resolver", descripcion)
-        registrar_operacion(_fila_orden(request, result, f"{descripcion} (pendiente)"))
+        anotar(lambda: _fila_orden(request, result, f"{descripcion} (pendiente)"))
         return INCIERTA, result
 
     log.error("%s fallida: retcode=%s comment=%s", descripcion, retcode, result.comment)
-    registrar_operacion(_fila_orden(request, result, f"{descripcion} (fallida)"))
+    anotar(lambda: _fila_orden(request, result, f"{descripcion} (fallida)"))
     return RECHAZADA, result
 
 
@@ -298,6 +310,16 @@ def abrir(lado: str, atr: float, info, tick, estado: dict) -> None:
         tipo, precio, sl, tp = mt5.ORDER_TYPE_BUY, tick.ask, tick.ask - sl_dist, tick.ask + tp_dist
     else:
         tipo, precio, sl, tp = mt5.ORDER_TYPE_SELL, tick.bid, tick.bid + sl_dist, tick.bid - tp_dist
+
+    # La intención se persiste ANTES de enviar: si cualquier cosa falla a partir de aquí (una excepción, un
+    # corte, un reinicio), queda constancia de que pudo haber una orden y no se abre otra hasta resolverla.
+    estado["pendiente"] = {"orden": None, "lado": lado, "enviada_servidor": int(tick.time),
+                           "enviada_local": time.time()}
+    guardar_estado(estado)
+    if estado.get("error_estado") or estado.get("estado_irrecuperable"):
+        log.error("No se envía la entrada: no se pudo guardar la intención (%s)",
+                  estado.get("error_estado") or "estado irrecuperable")
+        return
     resultado, result = enviar({
         "action": mt5.TRADE_ACTION_DEAL,
         "symbol": config.SYMBOL,
@@ -313,10 +335,10 @@ def abrir(lado: str, atr: float, info, tick, estado: dict) -> None:
         "type_filling": modo_llenado(info),
     }, f"Apertura {lado.upper()}", confirmar=lambda: posicion_abierta() is not None)
     if resultado == INCIERTA:
-        # Se guarda antes de seguir: hasta resolverla no se abre nada más, ni tras un reinicio.
-        estado["pendiente"] = {"orden": getattr(result, "order", 0) or None, "lado": lado,
-                               "enviada_servidor": int(tick.time), "enviada_local": time.time()}
-        guardar_estado(estado)
+        estado["pendiente"]["orden"] = getattr(result, "order", 0) or None  # hasta resolverla no se abre nada más
+    else:
+        estado["pendiente"] = None  # ejecutada (la posición existe) o rechazada (no hay orden)
+    guardar_estado(estado)
 
 
 def resolver_pendiente(estado: dict) -> None:
@@ -410,9 +432,9 @@ def registrar_deals(estado: dict) -> None:
         evento = "cierre" if d.entry == mt5.DEAL_ENTRY_OUT else "entrada"
         log.info("Deal de %s, posición %s: precio=%s beneficio=%s swap=%s comisión=%s tasas=%s (%s)", evento,
                  d.position_id, d.price, d.profit, d.swap, d.commission, getattr(d, "fee", 0.0), d.comment)
-        registrar_operacion({"evento": evento, "ticket": d.position_id, "volumen": d.volume, "precio": d.price,
-                             "comentario": d.comment, "beneficio": d.profit, "swap": d.swap,
-                             "comision": d.commission, "tasas": getattr(d, "fee", 0.0)})
+        anotar({"evento": evento, "ticket": d.position_id, "volumen": d.volume, "precio": d.price,
+                "comentario": d.comment, "beneficio": d.profit, "swap": d.swap,
+                "comision": d.commission, "tasas": getattr(d, "fee", 0.0)})
 
 
 CLAVES_PERSISTIDAS = ("equity_max", "pendiente", "last_bar_time")

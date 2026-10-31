@@ -151,6 +151,11 @@ velas_en_trade = sum(r["time"] + tf_segundos > position.time for r in cerradas)
      * el historial de órdenes y deals: una orden ejecutada, aunque la posición ya se haya cerrado por SL/TP, cuenta como ejecutada; una orden cancelada, rechazada o expirada, como no ejecutada.
 
      Una consulta vacía del historial no prueba nada, porque justo después de conectar MT5 puede devolverlo incompleto. Por eso, sin ninguna prueba, la entrada solo se da por no enviada tras `PENDIENTE_SIN_RASTRO_S` sin rastro en ningún sitio.
+   * **La intención de entrada se guarda antes de enviar.** Antes de `order_send`, la entrada queda en el estado como pendiente sin número de orden. Después del envío se actualiza:
+     * ejecutada o rechazada: se borra;
+     * incierta: se le añade el número de orden.
+
+     Si algo falla entre medias (una excepción, un corte, un reinicio), queda constancia de que pudo haber una orden, y se resuelve igual que cualquier pendiente: por posiciones, órdenes e historial, o tras `PENDIENTE_SIN_RASTRO_S` sin rastro. Si la intención no se puede guardar, la entrada no se envía.
    * Mientras haya cualquier orden del bot colocada en el servidor no se abre una entrada nueva ni se envía otro cierre por time stop.
    * Cualquier otro código es un rechazo. No se reintenta a ciegas: se registran `retcode` y `comment`. Frecuentes: `10004` requote, `10014` volumen inválido, `10016` stops inválidos, `10018` mercado cerrado, `10019` margen insuficiente, `10030` modo de llenado no soportado.
 3. **Cuenta:** se verifica al arrancar, tras cada reconexión y antes de cada orden. Si cambia el login o la cuenta es real sin permiso, el bot se detiene.
@@ -162,7 +167,7 @@ velas_en_trade = sum(r["time"] + tf_segundos > position.time for r in cerradas)
    * **Sin ningún archivo** es la primera ejecución y se empieza con la equity actual como máximo.
    * **Si hay archivos pero ninguno es válido,** el estado es **irrecuperable** y el bot **no abre nuevas entradas**, aunque sigue gestionando la posición abierta. Tampoco sobrescribe los archivos, para no tapar la evidencia, y el bloqueo se mantiene tras reiniciar. Adoptar la equity actual como máximo borraría en silencio el drawdown acumulado. Para salir de ahí, revisa los archivos y bórralos.
    * **Si una escritura falla** (disco, permisos, antivirus), no se abren entradas hasta que una escritura posterior funcione.
-7. **Registro:** `logs/operaciones.csv` guarda cada orden (precio pedido y ejecutado, deslizamiento en puntos, spread, volumen, retcode) y cada deal del bot: las entradas, con la comisión que se cobre al entrar, y los cierres, también los de SL y TP en el servidor, con beneficio, swap, comisión y tasas. Sirve para comparar la ejecución real con la simulación.
+7. **Registro:** `logs/operaciones.csv` guarda cada orden (precio pedido y ejecutado, deslizamiento en puntos, spread, volumen, retcode) y cada deal del bot: las entradas, con la comisión que se cobre al entrar, y los cierres, también los de SL y TP en el servidor, con beneficio, swap, comisión y tasas. Sirve para comparar la ejecución real con la simulación. Es un registro de auditoría: si escribirlo falla (disco lleno, permisos, un dato inesperado), se avisa en `logs/trading_bot.log` y la orden y su reconciliación siguen su curso.
 
 ---
 
@@ -173,6 +178,7 @@ velas_en_trade = sum(r["time"] + tf_segundos > position.time for r in cerradas)
   * ejecuciones parciales al abrir y al cerrar, y resultados inciertos (ejecutados o no) sin duplicar;
   * órdenes PLACED que se ejecutan tarde, se cancelan, o entran y salen por SL antes de que el bot las vea; respuestas perdidas sin rastro; la entrada pendiente tras un reinicio; y cierres colocados que no se duplican;
   * reinicios dentro de la misma vela, con y sin el estado guardado, sin repetir la entrada;
+  * la intención guardada antes de enviar: fallos del CSV con una orden PLACED, excepciones a mitad del envío, rechazos, y la negativa a enviar si la intención no se puede guardar;
   * cambio de cuenta tras reconectar, cuenta real e instancia única;
   * pausa, pérdida diaria (comisiones de entrada, swap, tasas, flotante y deals de ayer), drawdown persistido y el registro de operaciones;
   * estado truncado o con valores inválidos (recuperación desde el respaldo o bloqueo sin sobrescribir), escritura interrumpida a mitad y fallos de disco.
