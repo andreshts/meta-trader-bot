@@ -1,0 +1,160 @@
+# Guía Operativa y Ejecución en Tiempo Real 🤖
+
+Instrucciones para la ejecución automatizada, la gestión de riesgos y el bucle de trading en vivo conectado a **MetaTrader 5**.
+
+---
+
+## ⚙️ 1. Parámetros de Riesgo y Operaciones
+
+Cada orden enviada por el bot incorpora protección estricta desde su creación en la API de MT5 (`mt5.order_send`).
+
+### Configuración de Parámetros
+
+| Parámetro | Valor por defecto | Descripción |
+| :--- | :--- | :--- |
+| `VOLUMEN` | `0.01` lotes | Tamaño fijo de la posición cuando `RIESGO_PCT` es `None`. |
+| `RIESGO_PCT` | `None` | Si se define (ej. `0.005` = 0.5% del capital), el lote se calcula según el riesgo por operación (ver abajo). |
+| `SL_MULTIPLICADOR_ATR` | `1.5` | Stop Loss dinámico según la volatilidad actual (`1.5 * ATR(14)`). |
+| `TP_MULTIPLICADOR_ATR` | `3.0` | Take Profit dinámico (Relación Riesgo/Beneficio 1:2). |
+| `MAX_BARS_EN_TRADE` | `48` velas | Time stop (12 h en M15): cierra la posición a mercado. Igual a la barrera temporal `N` del target. |
+| `MAX_SPREAD_PUNTOS` | `25` puntos | Filtro de spread: no opera si el spread actual supera este límite (noticias/apertura). |
+| `MAX_RETRASO_ENTRADA_S` | `60` segundos | No entra si la vela nueva se detecta más tarde de esto tras su apertura (arranque, reconexión). |
+| `DESVIACION_SLIPPAGE` | `20` puntos | Tolerancia máxima de deslizamiento de precio en la ejecución. |
+| `MAGIC_NUMBER` | `202601` | Identificador único para gestionar solo las órdenes de este bot. |
+| `PERMITIR_CUENTA_REAL` | `False` | El bot se detiene si la cuenta es real (al arrancar, tras reconectar y antes de cada orden), salvo que se active a propósito. |
+| `MAX_LOTES` | `1.0` | Tope de volumen por operación, también con `RIESGO_PCT`. |
+| `MAX_PERDIDA_DIARIA_PCT` | `0.02` | Sin nuevas entradas el resto del día (del servidor) si los cierres del bot de hoy pierden este % del balance. |
+| `MAX_DRAWDOWN_PCT` | `0.10` | Sin nuevas entradas si la equity cae este % desde su máximo. El máximo se guarda en `logs/estado_bot.json`, así que sobrevive a reinicios; para reanudar hay que revisarlo y borrar el archivo. |
+| `REINTENTO_CIERRE_S` | `10` segundos | Si un cierre por time stop falla, pausa antes del siguiente intento (sin esperar a otra vela). |
+| `ESPERA_RECONCILIACION_S` | `1` segundo | Espera antes de mirar las posiciones cuando `order_send` da un resultado incierto. |
+| `EXIGIR_VENTAJA_SIGNIFICATIVA` | `True` | El bot no arranca si el modelo no tiene ventaja significativa en el walk-forward y en el holdout ([Entrenamiento.md](Entrenamiento.md)). Ponerlo en `False` solo para probar la mecánica en Demo. |
+| `T_MINIMO_TEST` | `2.0` | La esperanza agregada de todos los tests del walk-forward debe superar 0 por al menos 2 errores estándar (`t = media / (std / √n)`). |
+| `MIN_TRADES_TEST` | `30` | Trades fuera de muestra mínimos para que ese `t` sea fiable. |
+| `WF_MIN_PROP_VENTANAS_POSITIVAS` | `0.6` | Además, la esperanza debe ser positiva en al menos el 60% de las ventanas. |
+| `SEMILLAS_ROBUSTEZ` | `(42, 1, 2)` | El walk-forward se repite con cada semilla del Random Forest y **todas** deben cumplir lo anterior. Un único entrenamiento cerca del umbral puede pasar por suerte. |
+
+Los umbrales de probabilidad (`umbral_long`, `umbral_short`) **no** se fijan a mano: se leen del archivo del modelo, donde se guardaron tras elegirlos en el Validation Set ([Entrenamiento.md](Entrenamiento.md)). Al arrancar, el bot comprueba que `SL_MULTIPLICADOR_ATR`, `TP_MULTIPLICADOR_ATR`, `MAX_BARS_EN_TRADE`, símbolo y timeframe coinciden con `sl_mult`, `tp_mult`, `n_barras`, `symbol` y `timeframe` del modelo, y se detiene si no.
+
+> [!NOTE]
+> **Pips vs. Puntos en MT5:** Los límites se expresan en **puntos** (`symbol_info.point`) porque valen para cualquier activo. En Forex con 3 o 5 decimales, **1 pip = 10 puntos**, así que `25` puntos = 2.5 pips:
+> ```python
+> pip_size = 10 * symbol_info.point if symbol_info.digits in (3, 5) else symbol_info.point
+> ```
+> Esta conversión solo vale para pares de divisas. En oro, índices o cripto la convención de "pip" depende del broker; en esos activos se trabaja directamente en puntos.
+
+### Dimensionamiento por Riesgo (opcional)
+
+Con `RIESGO_PCT` definido, el lote se ajusta para que tocar el Stop Loss cueste ese porcentaje del capital:
+
+```python
+info = mt5.symbol_info(symbol)
+sl_dist = SL_MULTIPLICADOR_ATR * atr
+perdida_por_lote = (sl_dist / info.trade_tick_size) * info.trade_tick_value
+lotes = mt5.account_info().equity * RIESGO_PCT / perdida_por_lote
+lotes = round(math.floor(lotes / info.volume_step + 1e-9) * info.volume_step, 8)  # 1e-9: 0.03 / 0.01 = 2.9999…
+```
+
+Si el resultado queda por debajo de `info.volume_min`, **no se opera** (el lote mínimo ya arriesgaría más de lo permitido). Nunca se supera `info.volume_max` ni `MAX_LOTES`.
+
+Con `VOLUMEN` fijo, el riesgo en dinero de cada trade cambia con el ATR. Con `RIESGO_PCT`, cada trade arriesga lo mismo, que es justo lo que supone el backtest al medir en R. `RIESGO_PCT` viene en `None` para que las pruebas en Demo usen 0.01 lotes.
+
+---
+
+## 🕯️ 2. Sincronización con Velas y Hora del Servidor
+
+* **Detección de nueva vela:** se lee la vela en formación (`copy_rates_from_pos(symbol, tf, 0, 1)`) y se compara su `time` con `last_bar_time`. Ambos son enteros de la misma fuente, así que la comparación no depende de zonas horarias. Nunca se compara contra el reloj local (`datetime.now()`).
+* **Hora del servidor, no UTC:** `time` está en la hora del servidor del broker (a menudo GMT+2/+3), aunque se lea como un timestamp. No se convierte con `utc=True` ni se mezcla con la hora local.
+* **`last_bar_time` se actualiza en cada vela nueva, haya o no posición abierta.** Si solo se actualizara sin posición, al cerrarse un trade a mitad de vela la siguiente vuelta detectaría una "vela nueva" falsa y entraría a mitad de vela, lo que no coincide con el entrenamiento (entrada en la apertura).
+* **La gestión de la posición no depende de la vela nueva.** El time stop se comprueba en cada vuelta del bucle, así que un cierre que falla se reintenta a los `REINTENTO_CIERRE_S` segundos, no 15 minutos después. Las entradas sí se evalúan solo una vez, en la apertura de cada vela.
+* **Entrada tardía:** si la vela nueva se detecta con retraso, se compara `symbol_info_tick(symbol).time` (también en hora del servidor) con el `time` de la vela. Si han pasado más de `MAX_RETRASO_ENTRADA_S`, se salta esa vela. Esto cubre el arranque del bot a mitad de vela y las reconexiones.
+* **Features:** se calculan sobre las últimas 200 velas **cerradas** (`copy_rates_from_pos(symbol, tf, 1, 200)`) con la misma `build_features()` del entrenamiento.
+
+---
+
+## 🔄 3. Ciclo de Ejecución en Tiempo Real (Flujo Continuo)
+
+A diferencia de un sondeo ciego por tiempo, el bot está sincronizado con el **cierre y apertura de velas (*New Bar Event*)** para garantizar que los indicadores sean calculados sobre datos consolidados y sin repintado.
+
+```mermaid
+flowchart TD
+    Inicio([Vuelta del bucle, cada 2 s]) --> CheckConn{"¿Terminal MT5 conectado?"}
+    CheckConn -- No --> ReintentarConn["Reconectar cada 5 s"] --> CheckConn
+    CheckConn -- "Sí, tras reconectar" --> Reverif["Verificar cuenta:<br>mismo login y Demo"] --> Equity
+    CheckConn -- Sí --> Equity["Actualizar máximo de equity<br>(logs/estado_bot.json)"]
+
+    Equity --> CheckPos{"¿Posición abierta<br>con Magic Number?"}
+    CheckPos -- Sí --> CheckTimeout{"¿Velas en el trade<br>≥ MAX_BARS_EN_TRADE?"}
+    CheckTimeout -- Sí --> ClosePos["Cerrar a mercado; si falla,<br>reintento tras REINTENTO_CIERRE_S"] --> CheckNewBar
+    CheckTimeout -- No --> CheckNewBar
+    CheckPos -- No --> CheckNewBar{"¿Nueva vela?<br>time != last_bar_time"}
+
+    CheckNewBar -- No --> SleepLoop["Dormir 2 s"]
+    CheckNewBar -- Sí --> UpdateBar["last_bar_time = time<br>registrar cierres nuevos"]
+    UpdateBar --> HabiaPos{"¿Había posición<br>en esta vuelta?"}
+    HabiaPos -- Sí --> SleepLoop
+    HabiaPos -- No --> Limites{"¿Pausa, drawdown o<br>pérdida diaria al límite?"}
+    Limites -- Sí --> SleepLoop
+    Limites -- No --> Filtros{"¿Retraso ≤ MAX_RETRASO_ENTRADA_S<br>y spread ≤ MAX_SPREAD_PUNTOS?"}
+    Filtros -- No --> SleepLoop
+    Filtros -- Sí --> Predict["200 velas cerradas → build_features()<br>→ predict_proba Long y Short"]
+
+    Predict --> EvalSignal{"Comparar con los umbrales<br>del modelo"}
+    EvalSignal -- "Solo P_long ≥ umbral_long" --> SendBuy["Verificar cuenta y enviar BUY<br>con SL y TP según ATR"]
+    EvalSignal -- "Solo P_short ≥ umbral_short" --> SendSell["Verificar cuenta y enviar SELL<br>con SL y TP según ATR"]
+    EvalSignal -- "Ninguno o ambos" --> SleepLoop
+
+    SendBuy --> Result{"Resultado de order_send"}
+    SendSell --> Result
+    Result -- "DONE / DONE_PARTIAL" --> Log["Registrar en logs/operaciones.csv"] --> SleepLoop
+    Result -- "Incierto: sin respuesta,<br>PLACED, TIMEOUT, CONNECTION" --> Reconcile["Mirar las posiciones:<br>¿se ejecutó?"] --> Log
+    Result -- "Rechazo" --> LogErr["Registrar retcode y comment"] --> SleepLoop
+```
+
+**Conteo de velas en el trade:** se cuentan las velas cerradas que terminan después de la apertura de la posición. `position.time` está en la misma hora del servidor que las velas. No se usa la diferencia de tiempo dividida entre la duración de la vela, porque los fines de semana y festivos la inflan:
+
+```python
+cerradas = mt5.copy_rates_from_pos(symbol, tf, 1, MAX_BARS_EN_TRADE + 5)
+velas_en_trade = sum(r["time"] + tf_segundos > position.time for r in cerradas)
+```
+
+`tf_segundos` es la duración de la vela (900 en M15, 3600 en H1). `position.time` en segundos es suficiente: la vela de entrada cuenta en cuanto cierra, y la anterior nunca cuenta porque cerró antes de la entrada, aunque la orden se ejecute en el mismo segundo de la apertura (por eso la comparación es estricta, `>`). No se usa `position.time_update`, que cambia al modificar SL/TP, ni `position.time_msc` sin dividir entre 1000: está en milisegundos y el conteo daría siempre 0, así que el time stop nunca saltaría.
+
+---
+
+## 📤 4. Envío de Órdenes
+
+* **Precio:** `ask` para BUY y `bid` para SELL (`mt5.symbol_info_tick`). SL y TP se calculan desde ese precio con el `ATR(14)` de la última vela cerrada y se redondean a `symbol_info.digits`.
+* **Distancia mínima de stops:** SL y TP deben estar a más de `symbol_info.trade_stops_level` puntos del precio, o la orden se rechaza (`10016`). Si el ATR es tan pequeño que no se cumple, no se opera.
+* **Modo de llenado:** `type_filling` debe ser uno de los que admite el símbolo (flags de `symbol_info.filling_mode`). Usar uno no soportado es la causa más común del error `10030`.
+* **Volumen:** múltiplo de `volume_step`, entre `volume_min` y `volume_max` (si no, `10014`).
+* **Comprobación previa:** `mt5.order_check(request)` valida margen, stops y volumen sin enviar la orden.
+* **Cuenta:** antes de cada orden se vuelve a comprobar que la cuenta es la del arranque y que no es real (salvo `PERMITIR_CUENTA_REAL`).
+* **Cierre por time stop:** orden `TRADE_ACTION_DEAL` del tipo opuesto, con `position=<ticket>`, el volumen que quede abierto y el mismo `MAGIC_NUMBER`. Si el cierre es parcial, la siguiente vuelta cierra el resto.
+
+---
+
+## 🛡️ 5. Reglas de Seguridad Operativa
+
+1. **Mono-posición y una sola instancia:** El bot no realiza operaciones concurrentes ni promedia a la baja (*no Martingala ni Grid*); solo mantiene una posición por símbolo. Al arrancar bloquea `logs/trading_bot.lock` con un bloqueo del sistema operativo, así que una segunda instancia se detiene. El bloqueo se libera solo si el proceso muere.
+2. **Resultados de las órdenes ([códigos de MT5](https://www.mql5.com/en/docs/constants/errorswarnings/enum_trade_return_codes)):**
+   * `10009` DONE y `10010` DONE_PARTIAL cuentan como ejecutadas; la parcial se avisa en el log con el volumen real.
+   * Sin respuesta (`order_send` devuelve `None`), `10008` PLACED, `10012` TIMEOUT y `10031` CONNECTION son **inciertos**: antes de decidir, el bot mira las posiciones para saber si la orden se ejecutó. Así no duplica una entrada ni da por cerrada una posición abierta.
+   * Cualquier otro código es un rechazo. No se reintenta a ciegas: se registran `retcode` y `comment`. Frecuentes: `10004` requote, `10014` volumen inválido, `10016` stops inválidos, `10018` mercado cerrado, `10019` margen insuficiente, `10030` modo de llenado no soportado.
+3. **Cuenta:** se verifica al arrancar, tras cada reconexión y antes de cada orden. Si cambia el login o la cuenta es real sin permiso, el bot se detiene.
+4. **Control de desconexión:** Si se pierde la conexión con el servidor del broker, las órdenes en el mercado siguen protegidas porque el Stop Loss y Take Profit residen en el servidor de MetaTrader, no en la memoria local del script de Python. El **time stop** sí depende del script: se comprueba en cada vuelta, así que si vence durante una desconexión o con el bot parado, la posición se cierra en cuanto vuelve la conexión. El conteo usa `position.time`, de modo que sobrevive a un reinicio.
+5. **Límites de riesgo:** la pausa manual (crear `logs/PAUSA`), la pérdida diaria (`MAX_PERDIDA_DIARIA_PCT`, solo con los cierres del bot) y el drawdown (`MAX_DRAWDOWN_PCT`, sobre la equity de toda la cuenta) bloquean **solo las nuevas entradas**: la posición abierta se sigue gestionando. El volumen nunca supera `MAX_LOTES`. Los límites suponen una cuenta dedicada al bot.
+6. **Registro:** `logs/operaciones.csv` guarda cada orden (precio pedido y ejecutado, deslizamiento en puntos, spread, volumen, retcode) y cada cierre, también los de SL y TP en el servidor, con beneficio, swap y comisión. Sirve para comparar la ejecución real con la simulación.
+
+---
+
+## 🧪 6. Pruebas y Supervisión
+
+* **Pruebas automáticas:** `python -m pytest tests` (unos 50 s). `tests/test_bot.py` usa un MT5 simulado para cubrir:
+  * cierres rechazados que se reintentan sin esperar otra vela, y el reinicio con una posición vencida;
+  * ejecuciones parciales al abrir y al cerrar, y resultados inciertos (ejecutados o no) sin duplicar;
+  * cambio de cuenta tras reconectar, cuenta real e instancia única;
+  * pausa, pérdida diaria, drawdown persistido y el registro de operaciones.
+
+  `tests/test_modelo.py` cubre features, etiquetado (costes, swap, time stop), walk-forward, holdout y el pipeline completo con una señal plantada y con ruido.
+* **Antes de dinero real:** varias semanas en Demo, comparando `logs/operaciones.csv` (deslizamiento, spread y swap reales) con lo que supone el backtest.
+* **Supervisión:** el bot no envía alertas por sí mismo. Conviene ejecutarlo con un supervisor que lo reinicie si se cae (por ejemplo, el Programador de tareas de Windows con "Si la tarea no se ejecuta, reiniciar cada…") y revisar `logs/trading_bot.log` a diario.

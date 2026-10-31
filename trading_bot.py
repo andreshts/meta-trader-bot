@@ -1,0 +1,466 @@
+"""Bucle de ejecución en tiempo real (ver Ejecucion.md).
+
+Uso: python trading_bot.py   (Ctrl+C para detenerlo; crear logs/PAUSA bloquea nuevas entradas)
+"""
+import csv
+import json
+import logging
+import math
+import os
+import time
+from datetime import datetime, timedelta, timezone
+
+import joblib
+import MetaTrader5 as mt5
+import numpy as np
+
+import config
+import mt5_utils
+from features import build_features
+from train_model import ventaja_significativa
+
+log = logging.getLogger("trading_bot")
+
+ACCOUNT_TRADE_MODE_REAL = getattr(mt5, "ACCOUNT_TRADE_MODE_REAL", 2)
+FLAG_FILLING_FOK, FLAG_FILLING_IOC = 1, 2  # bits de symbol_info.filling_mode
+RETCODES_EJECUTADA = {mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_DONE_PARTIAL}
+RETCODES_INCIERTOS = {mt5.TRADE_RETCODE_PLACED, mt5.TRADE_RETCODE_TIMEOUT, mt5.TRADE_RETCODE_CONNECTION}
+CAMPOS_OPERACIONES = ["fecha", "evento", "ticket", "tipo", "volumen_pedido", "volumen", "precio_pedido", "precio",
+                      "slippage_puntos", "spread_puntos", "sl", "tp", "retcode", "comentario",
+                      "beneficio", "swap", "comision"]
+
+
+def configurar_logs() -> None:
+    config.LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        handlers=[logging.StreamHandler(), logging.FileHandler(config.LOG_PATH, encoding="utf-8")],
+    )
+
+
+class InstanciaUnica:
+    """Bloqueo exclusivo de un archivo: una segunda instancia del bot no puede arrancar.
+
+    El sistema operativo libera el bloqueo si el proceso muere, así que no quedan bloqueos huérfanos.
+    """
+
+    def __init__(self, ruta):
+        self.ruta = ruta
+        self._archivo = None
+
+    def __enter__(self):
+        self.ruta.parent.mkdir(parents=True, exist_ok=True)
+        self._archivo = open(self.ruta, "a+")
+        try:
+            self._archivo.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(self._archivo.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self._archivo, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            self._archivo.close()
+            raise SystemExit(f"Ya hay otra instancia de trading_bot.py en marcha ({self.ruta})")
+        return self
+
+    def __exit__(self, *_):
+        try:
+            self._archivo.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(self._archivo.fileno(), msvcrt.LK_UNLCK, 1)
+        finally:
+            self._archivo.close()
+
+
+def cargar_modelo() -> dict:
+    """Carga el bundle y se detiene si fue entrenado con parámetros distintos a config.py."""
+    if not config.MODEL_PATH.exists():
+        raise SystemExit(f"No existe {config.MODEL_PATH}; ejecuta antes python train_model.py")
+    bundle = joblib.load(config.MODEL_PATH)
+    esperado = {
+        "sl_mult": config.SL_MULTIPLICADOR_ATR,
+        "tp_mult": config.TP_MULTIPLICADOR_ATR,
+        "n_barras": config.MAX_BARS_EN_TRADE,
+        "symbol": config.SYMBOL,
+        "timeframe": config.TIMEFRAME,
+    }
+    distintos = {k: (bundle.get(k), v) for k, v in esperado.items() if bundle.get(k) != v}
+    if distintos:
+        raise SystemExit(f"El modelo no coincide con config.py, (modelo, config): {distintos}")
+    if bundle["umbral_long"] is None and bundle["umbral_short"] is None:
+        raise SystemExit("Ambos lados están desactivados en el modelo: no hay nada que operar")
+    if config.EXIGIR_VENTAJA_SIGNIFICATIVA and not ventaja_significativa(bundle["informe"]):
+        informe = bundle["informe"]
+        if "robustez" not in informe or "holdout" not in informe:
+            detalle = "el modelo es anterior a la comprobación de robustez y holdout; reentrénalo"
+        else:
+            holdout = informe["holdout"]
+            detalle = ", ".join(f"semilla {r['semilla']}: trades={r['walk_forward']['agregado'].get('trades')} "
+                                f"t={r['walk_forward']['agregado'].get('t_stat', 0.0):.2f}" for r in informe["robustez"])
+            detalle += (f"; holdout desde {holdout.get('desde')}: trades={holdout.get('trades')} "
+                        f"t={holdout.get('t_stat', 0.0):.2f}")
+        raise SystemExit(
+            f"El modelo no tiene ventaja significativa y robusta ({detalle}). Se exige t >= {config.T_MINIMO_TEST} "
+            f"con >= {config.MIN_TRADES_TEST} trades y esperanza > 0 en >= {config.WF_MIN_PROP_VENTANAS_POSITIVAS:.0%} "
+            f"de las ventanas con todas las semillas {list(config.SEMILLAS_ROBUSTEZ)}, y t >= {config.T_MINIMO_TEST} "
+            f"con >= {config.MIN_TRADES_TEST} trades en el holdout. Para probar solo la mecánica en Demo: "
+            "EXIGIR_VENTAJA_SIGNIFICATIVA = False")
+    return bundle
+
+
+def verificar_cuenta(login_esperado=None) -> int:
+    """Comprueba la cuenta antes de operar y tras reconectar. Se detiene si cambió o si es real sin permiso."""
+    cuenta = mt5.account_info()
+    if cuenta is None:
+        raise RuntimeError(f"No se pudo leer la cuenta: {mt5.last_error()}")
+    if login_esperado is not None and cuenta.login != login_esperado:
+        raise SystemExit(f"La terminal cambió de cuenta ({login_esperado} -> {cuenta.login}); el bot se detiene")
+    if cuenta.trade_mode == ACCOUNT_TRADE_MODE_REAL and not config.PERMITIR_CUENTA_REAL:
+        raise SystemExit("Cuenta REAL detectada. El bot solo opera en Demo salvo PERMITIR_CUENTA_REAL = True")
+    return cuenta.login
+
+
+def esperar_conexion(login) -> None:
+    """Espera a que la terminal esté conectada; si hubo que reconectar, vuelve a verificar la cuenta."""
+    reconectado = False
+    while True:
+        terminal = mt5.terminal_info()
+        if terminal is not None and terminal.connected:
+            if reconectado:
+                verificar_cuenta(login)
+                log.info("Conexión recuperada; cuenta %s verificada", login)
+            return
+        reconectado = True
+        log.warning("Sin conexión con MT5; reintento en %ss", config.REINTENTO_CONEXION_S)
+        if terminal is None:
+            mt5.shutdown()
+            mt5_utils.conectar()
+        time.sleep(config.REINTENTO_CONEXION_S)
+
+
+def posiciones_del_bot() -> list:
+    posiciones = mt5.positions_get(symbol=config.SYMBOL)
+    if posiciones is None:
+        raise RuntimeError(f"positions_get falló: {mt5.last_error()}")
+    return [p for p in posiciones if p.magic == config.MAGIC_NUMBER]
+
+
+def posicion_abierta():
+    propias = posiciones_del_bot()
+    return propias[0] if propias else None
+
+
+def velas_en_trade(pos) -> int:
+    """Velas cerradas que terminan después de la apertura (hora del servidor en ambos lados)."""
+    cerradas = mt5_utils.descargar_velas(1, config.MAX_BARS_EN_TRADE + 5)
+    return int(np.count_nonzero(cerradas["time"].to_numpy() + config.TIMEFRAME_SEGUNDOS > pos.time))
+
+
+def modo_llenado(info) -> int:
+    if info.filling_mode & FLAG_FILLING_FOK:
+        return mt5.ORDER_FILLING_FOK
+    if info.filling_mode & FLAG_FILLING_IOC:
+        return mt5.ORDER_FILLING_IOC
+    return mt5.ORDER_FILLING_RETURN
+
+
+def calcular_volumen(info, sl_dist: float):
+    """Lote fijo o por riesgo, ajustado a volume_step y limitado por MAX_LOTES. None si no cabe en volume_min."""
+    if config.RIESGO_PCT is None:
+        lotes = config.VOLUMEN
+    else:
+        perdida_por_lote = sl_dist / info.trade_tick_size * info.trade_tick_value
+        lotes = mt5.account_info().equity * config.RIESGO_PCT / perdida_por_lote
+    lotes = min(lotes, info.volume_max, config.MAX_LOTES)
+    lotes = round(math.floor(lotes / info.volume_step + 1e-9) * info.volume_step, 8)
+    if lotes < info.volume_min:
+        return None
+    return lotes
+
+
+def registrar_operacion(fila: dict) -> None:
+    """Añade una fila a logs/operaciones.csv (órdenes enviadas y cierres con su resultado)."""
+    config.OPERACIONES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    nuevo = not config.OPERACIONES_PATH.exists()
+    with open(config.OPERACIONES_PATH, "a", newline="", encoding="utf-8") as f:
+        escritor = csv.DictWriter(f, fieldnames=CAMPOS_OPERACIONES)
+        if nuevo:
+            escritor.writeheader()
+        escritor.writerow({"fecha": datetime.now().isoformat(timespec="seconds"), **fila})
+
+
+def _fila_orden(request: dict, result, descripcion: str) -> dict:
+    info, tick = mt5.symbol_info(config.SYMBOL), mt5.symbol_info_tick(config.SYMBOL)
+    compra = request["type"] == mt5.ORDER_TYPE_BUY
+    precio = getattr(result, "price", None) or None
+    slippage = None
+    if precio:
+        slippage = round(((precio - request["price"]) if compra else (request["price"] - precio)) / info.point, 1)
+    return {
+        "evento": descripcion,
+        "ticket": request.get("position") or getattr(result, "order", None),
+        "tipo": "BUY" if compra else "SELL",
+        "volumen_pedido": request["volume"],
+        "volumen": getattr(result, "volume", None),
+        "precio_pedido": request["price"],
+        "precio": precio,
+        "slippage_puntos": slippage,
+        "spread_puntos": round((tick.ask - tick.bid) / info.point) if tick else None,
+        "sl": request.get("sl"),
+        "tp": request.get("tp"),
+        "retcode": getattr(result, "retcode", None),
+        "comentario": getattr(result, "comment", None),
+    }
+
+
+def enviar(request: dict, descripcion: str, confirmar) -> bool:
+    """order_check + order_send, sin reintentos.
+
+    DONE y DONE_PARTIAL cuentan como ejecutadas (una parcial se avisa en el log). Si el resultado es incierto
+    (sin respuesta, PLACED, TIMEOUT o CONNECTION) se reconcilia con `confirmar()`, que mira las posiciones.
+    """
+    check = mt5.order_check(request)
+    if check is None:
+        log.error("%s: order_check devolvió None: %s", descripcion, mt5.last_error())
+        return False
+    if check.retcode != 0:
+        log.error("%s rechazada por order_check: retcode=%s comment=%s", descripcion, check.retcode, check.comment)
+        return False
+    result = mt5.order_send(request)
+    retcode = None if result is None else result.retcode
+
+    if retcode in RETCODES_EJECUTADA:
+        if retcode == mt5.TRADE_RETCODE_DONE_PARTIAL:
+            log.warning("%s ejecutada PARCIALMENTE: volumen=%s de %s", descripcion, result.volume, request["volume"])
+        else:
+            log.info("%s ejecutada: orden=%s volumen=%s precio=%s", descripcion, result.order, result.volume, result.price)
+        registrar_operacion(_fila_orden(request, result, descripcion))
+        return True
+
+    if result is None or retcode in RETCODES_INCIERTOS:
+        motivo = mt5.last_error() if result is None else f"retcode={retcode} comment={result.comment}"
+        log.warning("%s con resultado incierto (%s); se reconcilia con las posiciones", descripcion, motivo)
+        time.sleep(config.ESPERA_RECONCILIACION_S)
+        if confirmar():
+            log.info("%s confirmada al reconciliar", descripcion)
+            registrar_operacion(_fila_orden(request, result, f"{descripcion} (reconciliada)"))
+            return True
+        log.error("%s no se ejecutó (reconciliado)", descripcion)
+        return False
+
+    log.error("%s fallida: retcode=%s comment=%s", descripcion, retcode, result.comment)
+    registrar_operacion(_fila_orden(request, result, f"{descripcion} (fallida)"))
+    return False
+
+
+def abrir(lado: str, atr: float, info, tick, login) -> None:
+    verificar_cuenta(login)
+    sl_dist = config.SL_MULTIPLICADOR_ATR * atr
+    tp_dist = config.TP_MULTIPLICADOR_ATR * atr
+    distancia_minima = info.trade_stops_level * info.point + (tick.ask - tick.bid)
+    if sl_dist <= distancia_minima:
+        log.warning("SL de %.5f por debajo de la distancia mínima %.5f; no se opera", sl_dist, distancia_minima)
+        return
+    volumen = calcular_volumen(info, sl_dist)
+    if volumen is None:
+        log.warning("El lote mínimo %s supera el riesgo permitido; no se opera", info.volume_min)
+        return
+
+    if lado == "long":
+        tipo, precio, sl, tp = mt5.ORDER_TYPE_BUY, tick.ask, tick.ask - sl_dist, tick.ask + tp_dist
+    else:
+        tipo, precio, sl, tp = mt5.ORDER_TYPE_SELL, tick.bid, tick.bid + sl_dist, tick.bid - tp_dist
+    enviar({
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": config.SYMBOL,
+        "volume": volumen,
+        "type": tipo,
+        "price": precio,
+        "sl": round(sl, info.digits),
+        "tp": round(tp, info.digits),
+        "deviation": config.DESVIACION_SLIPPAGE,
+        "magic": config.MAGIC_NUMBER,
+        "comment": "rf_mt5",
+        "type_time": mt5.ORDER_TIME_GTC,
+        "type_filling": modo_llenado(info),
+    }, f"Apertura {lado.upper()}", confirmar=lambda: posicion_abierta() is not None)
+
+
+def cerrar(pos, info, login) -> None:
+    verificar_cuenta(login)
+    tick = mt5.symbol_info_tick(config.SYMBOL)
+    if pos.type == mt5.POSITION_TYPE_BUY:
+        tipo, precio = mt5.ORDER_TYPE_SELL, tick.bid
+    else:
+        tipo, precio = mt5.ORDER_TYPE_BUY, tick.ask
+    enviar({
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": config.SYMBOL,
+        "volume": pos.volume,
+        "type": tipo,
+        "position": pos.ticket,
+        "price": precio,
+        "deviation": config.DESVIACION_SLIPPAGE,
+        "magic": config.MAGIC_NUMBER,
+        "comment": "rf_mt5 time stop",
+        "type_time": mt5.ORDER_TIME_GTC,
+        "type_filling": modo_llenado(info),
+    }, f"Cierre por time stop (ticket {pos.ticket})",
+        confirmar=lambda: all(p.ticket != pos.ticket for p in posiciones_del_bot()))
+
+
+def gestionar_posicion(pos, info, estado: dict) -> None:
+    """Time stop. Se comprueba en cada vuelta del bucle; si un cierre falla se reintenta tras REINTENTO_CIERRE_S."""
+    if velas_en_trade(pos) < config.MAX_BARS_EN_TRADE:
+        return
+    ahora = time.monotonic()
+    if ahora - estado.get("ultimo_intento_cierre", -math.inf) < config.REINTENTO_CIERRE_S:
+        return
+    estado["ultimo_intento_cierre"] = ahora
+    cerrar(pos, info, estado["login"])
+
+
+def deals_del_bot() -> list:
+    """Deals del bot de los últimos 7 días (margen amplio: el filtro por fecha de MT5 no es en hora del servidor)."""
+    ahora = datetime.now(timezone.utc)
+    deals = mt5.history_deals_get(ahora - timedelta(days=7), ahora + timedelta(days=2))
+    if deals is None:
+        raise RuntimeError(f"history_deals_get falló: {mt5.last_error()}")
+    return [d for d in deals if d.magic == config.MAGIC_NUMBER and d.symbol == config.SYMBOL]
+
+
+def registrar_cierres(estado: dict) -> None:
+    """Registra los cierres nuevos (por SL, TP o time stop) con su beneficio, swap y comisión."""
+    for d in deals_del_bot():
+        if d.entry != mt5.DEAL_ENTRY_OUT or d.ticket in estado["deals_vistos"]:
+            continue
+        estado["deals_vistos"].add(d.ticket)
+        log.info("Posición %s cerrada: precio=%s beneficio=%s swap=%s comisión=%s (%s)",
+                 d.position_id, d.price, d.profit, d.swap, d.commission, d.comment)
+        registrar_operacion({"evento": "cierre", "ticket": d.position_id, "volumen": d.volume, "precio": d.price,
+                             "comentario": d.comment, "beneficio": d.profit, "swap": d.swap, "comision": d.commission})
+
+
+def cargar_estado() -> dict:
+    try:
+        return json.loads(config.ESTADO_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def actualizar_equity_max(estado: dict, equity: float) -> None:
+    """Máximo de equity de la cuenta, persistido para que el límite de drawdown sobreviva a reinicios."""
+    if equity > estado.get("equity_max", -math.inf):
+        estado["equity_max"] = equity
+        config.ESTADO_PATH.parent.mkdir(parents=True, exist_ok=True)
+        config.ESTADO_PATH.write_text(json.dumps({"equity_max": equity}), encoding="utf-8")
+
+
+def motivo_sin_entradas(estado: dict, cuenta):
+    """Motivo para no abrir nuevas entradas, o None. La gestión de la posición abierta sigue igual."""
+    if config.PAUSA_PATH.exists():
+        return f"pausa manual (existe {config.PAUSA_PATH})"
+    drawdown = (estado["equity_max"] - cuenta.equity) / estado["equity_max"]
+    if drawdown >= config.MAX_DRAWDOWN_PCT:
+        return (f"drawdown de {drawdown:.1%} desde el máximo de equity {estado['equity_max']:.2f} "
+                f"(límite {config.MAX_DRAWDOWN_PCT:.0%}); para reanudar, revisa y borra {config.ESTADO_PATH}")
+    inicio_dia = mt5.symbol_info_tick(config.SYMBOL).time // 86400 * 86400  # 00:00 del servidor
+    realizado = sum(d.profit + d.swap + d.commission + getattr(d, "fee", 0.0) for d in deals_del_bot()
+                    if d.entry == mt5.DEAL_ENTRY_OUT and d.time >= inicio_dia)
+    base = cuenta.balance - realizado
+    if -realizado >= config.MAX_PERDIDA_DIARIA_PCT * base:
+        return f"pérdida del día de {-realizado:.2f} (límite {config.MAX_PERDIDA_DIARIA_PCT:.0%} de {base:.2f})"
+    return None
+
+
+def evaluar_entrada(bundle: dict, info, bar_time: int, login) -> None:
+    tick = mt5.symbol_info_tick(config.SYMBOL)
+    if tick is None:
+        raise RuntimeError(f"symbol_info_tick falló: {mt5.last_error()}")
+    retraso = tick.time - bar_time
+    if retraso > config.MAX_RETRASO_ENTRADA_S:
+        log.info("Vela nueva detectada %ss después de su apertura; se espera a la siguiente", retraso)
+        return
+    spread_puntos = round((tick.ask - tick.bid) / info.point)
+    if spread_puntos > config.MAX_SPREAD_PUNTOS:
+        log.warning("Spread de %s puntos > %s; no se opera", spread_puntos, config.MAX_SPREAD_PUNTOS)
+        return
+
+    datos = build_features(mt5_utils.descargar_velas(1, config.BUFFER_VELAS), info.point)
+    x = datos[bundle["features"]].iloc[[-1]]
+    if x.isna().to_numpy().any():
+        log.warning("Features incompletas en la última vela cerrada; no se opera")
+        return
+
+    p_long = bundle["model_long"].predict_proba(x)[0, 1]
+    p_short = bundle["model_short"].predict_proba(x)[0, 1]
+    señal_long = bundle["umbral_long"] is not None and p_long >= bundle["umbral_long"]
+    señal_short = bundle["umbral_short"] is not None and p_short >= bundle["umbral_short"]
+    log.info("P_long=%.3f P_short=%.3f", p_long, p_short)
+    if señal_long == señal_short:
+        return
+    abrir("long" if señal_long else "short", float(datos["atr"].iloc[-1]), info, tick, login)
+
+
+def ciclo(bundle: dict, estado: dict) -> None:
+    """Una vuelta del bucle. La posición abierta se gestiona en cada vuelta; las entradas, solo con vela nueva."""
+    esperar_conexion(estado["login"])
+    cuenta = mt5.account_info()
+    if cuenta is None:
+        raise RuntimeError(f"account_info falló: {mt5.last_error()}")
+    actualizar_equity_max(estado, cuenta.equity)
+    info = mt5.symbol_info(config.SYMBOL)
+    pos = posicion_abierta()
+    if pos is not None:
+        gestionar_posicion(pos, info, estado)
+
+    bar_time = int(mt5_utils.descargar_velas(0, 1)["time"].iloc[0])
+    if bar_time == estado["last_bar_time"]:
+        return
+    # Se marca antes de evaluar: una entrada que falla no se reintenta a mitad de vela (no coincidiría con el
+    # entrenamiento). La gestión de la posición no depende de esto.
+    estado["last_bar_time"] = bar_time
+    try:
+        registrar_cierres(estado)
+    except RuntimeError:
+        log.warning("No se pudo leer el historial de deals", exc_info=True)
+    if pos is not None:
+        return
+    motivo = motivo_sin_entradas(estado, cuenta)
+    if motivo:
+        log.info("Sin nuevas entradas: %s", motivo)
+        return
+    evaluar_entrada(bundle, info, bar_time, estado["login"])
+
+
+def main() -> None:
+    configurar_logs()
+    with InstanciaUnica(config.LOCK_PATH):
+        bundle = cargar_modelo()
+        if not mt5_utils.conectar():
+            raise SystemExit(f"No se pudo conectar con MT5: {mt5.last_error()}")
+        try:
+            estado = {"login": verificar_cuenta(), "last_bar_time": None, **cargar_estado()}
+            estado["deals_vistos"] = {d.ticket for d in deals_del_bot()}
+            if not mt5.terminal_info().trade_allowed:
+                log.warning("El trading algorítmico está desactivado en la terminal (botón Algo Trading)")
+            log.info("Bot iniciado: %s %s, cuenta %s, umbral_long=%s umbral_short=%s (modelo del %s)",
+                     config.SYMBOL, config.TIMEFRAME, estado["login"], bundle["umbral_long"],
+                     bundle["umbral_short"], bundle.get("entrenado"))
+            while True:
+                try:
+                    ciclo(bundle, estado)
+                except Exception:
+                    log.exception("Error en el ciclo; se reintenta en la siguiente vuelta")
+                time.sleep(config.SLEEP_S)
+        except KeyboardInterrupt:
+            log.info("Bot detenido por el usuario")
+        finally:
+            mt5.shutdown()
+
+
+if __name__ == "__main__":
+    main()

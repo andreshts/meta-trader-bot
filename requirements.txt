@@ -1,0 +1,8 @@
+# Python 3.13. Versiones exactas: models/random_forest_mt5.pkl solo se deserializa
+# de forma fiable con la misma versión de scikit-learn (y numpy) con la que se entrenó.
+MetaTrader5==5.0.6231
+numpy==2.5.4
+pandas==3.1.0
+scikit-learn==1.9.1
+joblib==1.6.0
+python-dotenv==1.2.4
