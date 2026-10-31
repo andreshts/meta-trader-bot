@@ -406,6 +406,91 @@ def test_drawdown_bloquea_y_persiste(mt5, bundle):
     assert "drawdown" in tb.motivo_sin_entradas(estado, mt5.cuenta)
 
 
+# ---------------- estado persistido (regresión: un JSON corrupto borraba el drawdown) ----------------
+def _con_maximo_guardado(mt5, equity_max=12_000.0):
+    """Deja un estado válido con ese máximo y su respaldo (dos escrituras)."""
+    estado = nuevo_estado(mt5)
+    tb.actualizar_equity_max(estado, equity_max - 1)
+    tb.actualizar_equity_max(estado, equity_max)
+    principal, _, respaldo = tb.rutas_estado()
+    assert principal.exists() and respaldo.exists()
+    return principal, respaldo
+
+
+def test_estado_corrupto_se_recupera_del_respaldo_y_mantiene_el_drawdown(mt5, bundle):
+    """Antes cargar_estado() devolvía {} y la equity actual pasaba a ser el máximo: se volvía a entrar."""
+    principal, _ = _con_maximo_guardado(mt5)
+    principal.write_text('{"equity_max": 120', encoding="utf-8")       # escritura truncada
+    estado = {**nuevo_estado(mt5), **tb.cargar_estado()}
+    assert estado.get("equity_max") == 11_999.0                        # versión anterior, del respaldo
+    mt5.cuenta.equity = 10_000.0                                       # -16.7%: sigue bloqueado
+    tb.ciclo(bundle, estado)
+    assert aperturas(mt5) == [] and "drawdown" in tb.motivo_sin_entradas(estado, mt5.cuenta)
+
+
+@pytest.mark.parametrize("contenido", ['{"equity_max": 120', "", "[]", '{"equity_max": -5}', '{"equity_max": "x"}',
+                                       '{"equity_max": 1e9999}', '{"pendiente": {"orden": 1}}',
+                                       '{"equity_max": 100, "last_bar_time": "ayer"}'])
+def test_estado_irrecuperable_bloquea_entradas_y_conserva_la_evidencia(mt5, bundle, contenido):
+    principal, _, _ = tb.rutas_estado()
+    principal.write_text(contenido, encoding="utf-8")                  # sin respaldo
+    estado = {**nuevo_estado(mt5), **tb.cargar_estado()}
+    assert "estado_irrecuperable" in estado
+    mt5.abrir_posicion()
+    mt5.avanzar_vela(config.MAX_BARS_EN_TRADE)
+    tb.ciclo(bundle, estado)                                           # la posición se sigue gestionando
+    mt5.avanzar_vela()
+    tb.ciclo(bundle, estado)
+    assert len(cierres(mt5)) == 1 and aperturas(mt5) == []
+    assert "irrecuperable" in tb.motivo_sin_entradas(estado, mt5.cuenta)
+    assert principal.read_text(encoding="utf-8") == contenido          # no se sobrescribe
+    reiniciado = {**nuevo_estado(mt5), **tb.cargar_estado()}           # tras reiniciar sigue bloqueado
+    assert "estado_irrecuperable" in reiniciado
+
+
+def test_borrar_los_archivos_permite_empezar_de_cero(mt5, bundle):
+    principal, respaldo = _con_maximo_guardado(mt5)
+    principal.unlink()
+    respaldo.unlink()
+    estado = {**nuevo_estado(mt5), **tb.cargar_estado()}
+    assert estado.get("estado_irrecuperable") is None and "equity_max" not in estado   # primera ejecución
+    tb.ciclo(bundle, estado)
+    assert len(aperturas(mt5)) == 1
+
+
+def test_escritura_interrumpida_no_deja_un_principal_a_medias(mt5, monkeypatch):
+    principal, _ = _con_maximo_guardado(mt5)
+    reemplazar = tb.os.replace
+    llamadas = []
+
+    def corte(origen, destino):
+        llamadas.append(destino)
+        if len(llamadas) == 2:            # se corta justo antes de poner el temporal como principal
+            raise OSError("corte de luz")
+        reemplazar(origen, destino)
+
+    monkeypatch.setattr(tb.os, "replace", corte)
+    estado = {**nuevo_estado(mt5), **tb.cargar_estado()}
+    tb.actualizar_equity_max(estado, 13_000.0)
+    assert "error_estado" in estado and not principal.exists()
+    assert tb.cargar_estado()["equity_max"] == 13_000.0                # se recupera del temporal completo
+
+
+def test_fallo_al_guardar_bloquea_hasta_que_vuelve_a_funcionar(mt5, monkeypatch):
+    estado = nuevo_estado(mt5)
+    tb.actualizar_equity_max(estado, 10_000.0)
+
+    def falla(*_):
+        raise PermissionError("bloqueado por el antivirus")
+
+    with monkeypatch.context() as m:
+        m.setattr(tb.os, "replace", falla)
+        tb.actualizar_equity_max(estado, 10_100.0)
+        assert "no se pudo guardar" in tb.motivo_sin_entradas(estado, mt5.cuenta)
+    tb.actualizar_equity_max(estado, 10_200.0)
+    assert "error_estado" not in estado and tb.motivo_sin_entradas(estado, mt5.cuenta) is None
+
+
 def test_calcular_volumen(mt5, monkeypatch):
     for v in (0.01, 0.03, 0.07, 0.29):
         monkeypatch.setattr(config, "VOLUMEN", v)

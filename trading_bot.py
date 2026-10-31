@@ -416,21 +416,100 @@ def registrar_deals(estado: dict) -> None:
 
 
 CLAVES_PERSISTIDAS = ("equity_max", "pendiente", "last_bar_time")
+CLAVES_PENDIENTE = {"orden", "lado", "enviada_servidor", "enviada_local"}
+
+
+def rutas_estado() -> tuple:
+    """(principal, temporal, respaldo). El temporal solo existe a mitad de una escritura; el respaldo es la
+    versión anterior a la última escritura."""
+    ruta = config.ESTADO_PATH
+    return ruta, ruta.with_name(ruta.name + ".tmp"), ruta.with_name(ruta.name + ".bak")
+
+
+def validar_estado(datos) -> None:
+    """ValueError si el contenido no es un estado de riesgo utilizable."""
+    if not isinstance(datos, dict):
+        raise ValueError("no es un objeto JSON")
+    equity_max = datos.get("equity_max")
+    if isinstance(equity_max, bool) or not isinstance(equity_max, (int, float)) or not math.isfinite(equity_max) \
+            or equity_max <= 0:
+        raise ValueError(f"equity_max inválido: {equity_max!r}")
+    pendiente = datos.get("pendiente")
+    if pendiente is not None and (not isinstance(pendiente, dict) or not CLAVES_PENDIENTE <= pendiente.keys()):
+        raise ValueError(f"pendiente inválida: {pendiente!r}")
+    last_bar_time = datos.get("last_bar_time")
+    if last_bar_time is not None and (isinstance(last_bar_time, bool) or not isinstance(last_bar_time, int)):
+        raise ValueError(f"last_bar_time inválido: {last_bar_time!r}")
+
+
+def _leer_estado(ruta):
+    """Contenido válido de `ruta`, None si no existe. ValueError u OSError si existe pero no se puede usar."""
+    try:
+        texto = ruta.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    datos = json.loads(texto)
+    validar_estado(datos)
+    return datos
 
 
 def cargar_estado() -> dict:
-    try:
-        return json.loads(config.ESTADO_PATH.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+    """Estado persistido. Prueba el archivo principal, luego el temporal (una escritura interrumpida justo antes
+    de terminar) y luego el respaldo.
+
+    Sin ningún archivo es la primera ejecución y devuelve {}. Si hay archivos pero ninguno es válido, devuelve
+    {"estado_irrecuperable": motivo}: el máximo de equity se ha perdido y no se abren nuevas entradas hasta que
+    alguien lo revise. Adoptar la equity actual como máximo borraría en silencio el drawdown acumulado.
+    """
+    problemas = []
+    for ruta in rutas_estado():
+        try:
+            datos = _leer_estado(ruta)
+        except (ValueError, OSError) as e:
+            problemas.append(f"{ruta.name}: {e}")
+            continue
+        if datos is None:
+            continue
+        if ruta != config.ESTADO_PATH or problemas:
+            log.warning("Estado recuperado de %s (%s)", ruta, "; ".join(problemas) or "falta el principal")
+        return datos
+    if problemas:
+        motivo = "; ".join(problemas)
+        log.error("Estado de riesgo irrecuperable: %s", motivo)
+        return {"estado_irrecuperable": motivo}
+    return {}
 
 
 def guardar_estado(estado: dict) -> None:
     """Persiste lo que debe sobrevivir a un reinicio: el máximo de equity, la entrada pendiente y la última
-    vela procesada (para no volver a evaluar entradas en la misma vela tras reiniciar)."""
-    config.ESTADO_PATH.parent.mkdir(parents=True, exist_ok=True)
+    vela procesada (para no volver a evaluar entradas en la misma vela tras reiniciar).
+
+    Escritura atómica: se escribe un temporal completo (con fsync) y se renombra encima del principal, que antes
+    pasa a ser el respaldo. Un corte a mitad nunca deja un principal a medias. Si el estado era irrecuperable no
+    se escribe nada, para no tapar la evidencia; si la escritura falla, se bloquean las entradas hasta que funcione.
+    """
+    if estado.get("estado_irrecuperable"):
+        return
+    principal, temporal, respaldo = rutas_estado()
     datos = {k: estado[k] for k in CLAVES_PERSISTIDAS if k in estado}
-    config.ESTADO_PATH.write_text(json.dumps(datos), encoding="utf-8")
+    try:
+        principal.parent.mkdir(parents=True, exist_ok=True)
+        with open(temporal, "w", encoding="utf-8") as f:
+            json.dump(datos, f)
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            principal_valido = _leer_estado(principal) is not None
+        except (ValueError, OSError):
+            principal_valido = False  # no se rota un principal corrupto encima de un respaldo bueno
+        if principal_valido:
+            os.replace(principal, respaldo)
+        os.replace(temporal, principal)
+    except OSError as e:
+        estado["error_estado"] = f"no se pudo guardar {principal}: {e}"
+        log.error("%s", estado["error_estado"])
+        return
+    estado.pop("error_estado", None)
 
 
 def actualizar_equity_max(estado: dict, equity: float) -> None:
@@ -442,6 +521,12 @@ def actualizar_equity_max(estado: dict, equity: float) -> None:
 
 def motivo_sin_entradas(estado: dict, cuenta):
     """Motivo para no abrir nuevas entradas, o None. La gestión de la posición abierta sigue igual."""
+    if estado.get("estado_irrecuperable"):
+        principal, _, respaldo = rutas_estado()
+        return (f"estado de riesgo irrecuperable ({estado['estado_irrecuperable']}). Revisa {principal} y "
+                f"{respaldo.name}; para empezar de cero con la equity actual como máximo, bórralos y reinicia")
+    if estado.get("error_estado"):
+        return estado["error_estado"]
     if estado.get("pendiente"):
         return f"entrada pendiente de resolver (orden {estado['pendiente']['orden']})"
     if ordenes_activas_del_bot():
@@ -451,7 +536,8 @@ def motivo_sin_entradas(estado: dict, cuenta):
     drawdown = (estado["equity_max"] - cuenta.equity) / estado["equity_max"]
     if drawdown >= config.MAX_DRAWDOWN_PCT:
         return (f"drawdown de {drawdown:.1%} desde el máximo de equity {estado['equity_max']:.2f} "
-                f"(límite {config.MAX_DRAWDOWN_PCT:.0%}); para reanudar, revisa y borra {config.ESTADO_PATH}")
+                f"(límite {config.MAX_DRAWDOWN_PCT:.0%}); para reanudar, revisa y borra {config.ESTADO_PATH} "
+                f"y {rutas_estado()[2].name}")
     realizado, flotante = resultado_del_dia()
     base = cuenta.balance - realizado  # balance al empezar el día
     perdida = -(realizado + flotante)

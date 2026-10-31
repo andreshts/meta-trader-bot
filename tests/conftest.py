@@ -51,8 +51,22 @@ def velas_con_senal(n: int = 15_000, semilla: int = 1) -> pd.DataFrame:
     })
 
 
+@pytest.fixture(scope="session", autouse=True)
+def proyecto_intacto():
+    """Red de seguridad: falla si algún test escribe en logs/ o models/ del proyecto (p. ej. por deshacer el
+    aislamiento con monkeypatch.undo())."""
+    def foto():
+        return {str(p): p.stat().st_mtime_ns for carpeta in ("logs", "models")
+                for p in (config.BASE_DIR / carpeta).rglob("*")}
+    antes = foto()
+    yield
+    assert foto() == antes, "Un test modificó logs/ o models/ del proyecto"
+
+
 @pytest.fixture(autouse=True)
 def config_aislado(tmp_path, monkeypatch):
+    """Ningún test escribe en logs/ ni en models/ del proyecto, ni espera de verdad. No usar
+    monkeypatch.undo() en los tests: desharía también este aislamiento (usar monkeypatch.context())."""
     """Ningún test escribe en logs/ ni en models/ del proyecto, ni espera de verdad."""
     for nombre, archivo in {
         "LOG_PATH": "trading_bot.log",
