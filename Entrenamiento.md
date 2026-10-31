@@ -11,6 +11,7 @@ Los datos son extraídos directamente desde la terminal de **MetaTrader 5** medi
 * **Temporalidad recomendada (Timeframe):** M15 o H1 (evita el ruido excesivo de M1/M5 y reduce el impacto relativo del spread).
 * **Ventana de datos históricos:** 99,999 velas para entrenamiento (~4 años en M15; el tope es el `maxbars` de la terminal, 100,000, menos la vela en formación) y un búfer de mínimo **200 velas cerradas** para el cálculo de indicadores en vivo.
 * **Solo velas cerradas:** Se descarga desde la posición `1` (`copy_rates_from_pos(symbol, tf, 1, n)`). La posición `0` es la vela en formación y nunca entra en el cálculo de features.
+* **Velas al día:** justo después de conectar, la terminal puede devolver solo las velas que tenía en caché y completar el resto en segundo plano. Pasó en la práctica: un entrenamiento del 31 de octubre recibió velas solo hasta el día 29 y dejó el holdout vacío. `train_model.py` usa `descargar_cerradas_al_dia()`, que repite la descarga hasta que la última vela cerrada llega al último tick, y se detiene si no lo consigue.
 * **Hora del servidor:** El campo `time` es un entero (segundos) en la hora del servidor del broker, no en UTC real. Se conserva tal cual; si se añaden filtros de sesión, se expresan en la hora del broker.
 
 ### ⏱️ Convención Temporal (idéntica en entrenamiento y en vivo)
@@ -146,14 +147,18 @@ El modelo que se guarda es el de la última ventana, entrenado con los datos má
 
 ### Purga entre Bloques (*Purging*)
 
-La etiqueta de la fila `t` usa precios hasta `t+N`, así que las últimas `N` filas de cada bloque dependen de precios del bloque siguiente. Se eliminan **`N` velas (48)** en cada frontera Train→Validation y Validation→Test.
+La etiqueta de la fila `t` depende de las velas `t+1 … t+N` y, si cierra por tiempo, de la **apertura de `t+N+1`**. El etiquetado guarda para cada fila la última vela de la que depende su etiqueta (`fin_etiqueta`): la del SL/TP, o `t+N+1` si cerró por tiempo. En cada frontera se quitan de Train las filas con `fin_etiqueta` igual o posterior a la primera vela de Validation, y de Validation las que llegan hasta el Test.
+
+* **Purgar `N` filas no basta**, por dos motivos. El cierre por tiempo usa una vela más (`t+N+1`), y en el ejemplo de la revisión la apertura del test cambiaba el resultado de la última operación de validation, que interviene al elegir el umbral. Además, los filtros de spread y de stops quitan filas, así que `N` filas no equivalen a `N` velas.
+* **Una operación que terminó pronto por SL/TP antes de la frontera se conserva:** su etiqueta no usa ningún precio del bloque siguiente.
+* `tests/test_modelo.py` lo comprueba perturbando la primera vela de cada test y del holdout: ninguna etiqueta de Train ni de Validation puede cambiar. Lo hace con una serie plana en la que todas las operaciones cierran por tiempo, el peor caso para esta fuga.
 
 ### Período Final Reservado (*Holdout*)
 
 El walk-forward se ha reutilizado en decenas de experimentos (features, SL/TP, mercados, filtros), así que ya no es una prueba limpia: alguna variante puede salir bien por azar. Por eso hay un **holdout** que no se usa para elegir nada:
 
 * `HOLDOUT_DESDE = "2026-10-30"` (fecha del servidor). Todo lo anterior ya se usó en los experimentos, así que el holdout empieza después del último.
-* El walk-forward solo usa datos anteriores a esa fecha, menos `N` filas de purga, para que ninguna etiqueta mire dentro del holdout.
+* El walk-forward solo usa las filas cuya etiqueta termina antes de esa fecha (`t_fin_etiqueta`), así que ninguna mira dentro del holdout.
 * El modelo guardado, entrenado solo con datos anteriores, se evalúa una vez en el holdout con sus umbrales ya fijados.
 * El bot exige que el holdout también pase: al menos 30 trades y `t >= 2`. Mientras no se acumulen suficientes datos nuevos, el bot no arranca, y es lo correcto.
 * **Mover `HOLDOUT_DESDE` consume el holdout:** los datos que pasan al walk-forward dejan de ser una prueba limpia. Solo debe hacerse después de tomar una decisión con él, y fijando un holdout nuevo hacia delante.

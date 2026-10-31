@@ -524,6 +524,21 @@ def test_registro_de_ordenes_y_cierres(mt5, bundle):
     assert float(cierre["beneficio"]) == -1.5 and float(cierre["swap"]) == -0.1
 
 
+def test_descarga_espera_a_que_la_terminal_sincronice(monkeypatch):
+    """Regresión: al conectar, la terminal devolvió velas en caché hasta el día anterior y el holdout quedó vacío."""
+    from types import SimpleNamespace
+    import pandas as pd
+    tf = config.TIMEFRAME_SEGUNDOS
+    tick = SimpleNamespace(time=10_000 * tf + 5)
+    respuestas = [pd.DataFrame({"time": [9_000 * tf]}), pd.DataFrame({"time": [9_999 * tf]})]  # en caché, al día
+    monkeypatch.setattr(mt5_utils, "mt5", SimpleNamespace(symbol_info_tick=lambda _s: tick))
+    monkeypatch.setattr(mt5_utils, "descargar_velas", lambda desde, cantidad: respuestas.pop(0))
+    assert mt5_utils.descargar_cerradas_al_dia(10, espera_s=0)["time"].iloc[-1] == 9_999 * tf
+    monkeypatch.setattr(mt5_utils, "descargar_velas", lambda desde, cantidad: pd.DataFrame({"time": [9_000 * tf]}))
+    with pytest.raises(RuntimeError, match="no se sincronizaron"):
+        mt5_utils.descargar_cerradas_al_dia(10, intentos=3, espera_s=0)
+
+
 def test_velas_en_trade(mt5):
     from types import SimpleNamespace
     apertura = mt5.bar_time - 12 * config.TIMEFRAME_SEGUNDOS  # vela en la que se entró

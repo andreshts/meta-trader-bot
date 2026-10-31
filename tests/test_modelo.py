@@ -8,7 +8,7 @@ import pytest
 import config
 import features
 import train_model as tm
-from conftest import POINT, velas_aleatorias, velas_con_senal
+from conftest import POINT, velas_aleatorias, velas_con_senal, velas_planas
 
 BASE = 1.1000
 MIERCOLES_23H = int(datetime(2026, 10, 28, 23, tzinfo=timezone.utc).timestamp())
@@ -88,6 +88,13 @@ def test_time_stop_cierra_en_la_apertura_siguiente():
     e = etiquetar(d)
     assert e["to_long"] and e["k_long"] == 12 and e["y_long"] == 0
     assert np.isclose(e["r_long"], 0.0009 / 0.0015)
+    assert e["fin_etiqueta"] == 13 and e["t_fin_etiqueta"] == d["time"].iloc[13]   # depende de la vela t+N+1
+
+
+def test_fin_de_etiqueta_con_sl_o_tp():
+    e = etiquetar(barras(PLANO + [[BASE, BASE + 0.0010, BASE - 0.0005, BASE + 0.0008],
+                                  [BASE + 0.0008, BASE + 0.0035, BASE + 0.0007, BASE + 0.0030]] + PLANO * 12))
+    assert e["fin_etiqueta"] == 2      # los dos lados terminan en la vela 2 (TP del long, SL del short)
 
 
 def test_sin_horizonte_completo_es_nan():
@@ -138,14 +145,63 @@ def test_noches_de_swap(entrada, salida, noches):
 
 
 # ---------------- walk-forward, simulación y preparación ----------------
+def _filas(velas_de_cada_fila, horizonte):
+    """Filas ya preparadas: índice = vela de la fila, y su etiqueta llega hasta `horizonte` velas después."""
+    velas_de_cada_fila = np.asarray(velas_de_cada_fila)
+    return pd.DataFrame({"fin_etiqueta": velas_de_cada_fila + horizonte}, index=velas_de_cada_fila)
+
+
 def test_ventanas_walk_forward():
-    vs = list(tm.ventanas_walk_forward(1000, 5, 12))   # 8 segmentos de 125
+    vs = list(tm.ventanas_walk_forward(_filas(np.arange(1000), 13), 5))   # 8 segmentos de 125; N=12 -> t+13
     tr, va, te = vs[0]
-    assert (tr[0], tr[-1], va[0], va[-1], te[0], te[-1]) == (0, 237, 250, 362, 375, 499)
+    assert (tr[0], tr[-1], va[0], va[-1], te[0], te[-1]) == (0, 236, 250, 361, 375, 499)   # purga de 13, no 12
     tr, va, te = vs[-1]
-    assert (tr[-1], va[0], va[-1], te[0], te[-1]) == (737, 750, 862, 875, 999)
+    assert (tr[-1], va[0], va[-1], te[0], te[-1]) == (736, 750, 861, 875, 999)
     assert np.array_equal(np.concatenate([v[2] for v in vs]), np.arange(375, 1000))
-    assert all(tr[-1] + 12 < va[0] and va[-1] + 12 < te[0] for tr, va, te in vs)
+
+
+def test_la_purga_cuenta_velas_y_no_filas():
+    # Los filtros quitan filas: aquí solo queda una vela de cada dos, y la etiqueta llega 13 velas más allá.
+    datos = _filas(np.arange(0, 2000, 2), 13)
+    vela, fin = datos.index.to_numpy(), datos["fin_etiqueta"].to_numpy()
+    for tr, va, te in tm.ventanas_walk_forward(datos, 5):
+        assert (fin[tr] < vela[va[0]]).all() and (fin[va] < vela[te[0]]).all()
+        assert fin[tr[-1] + 1] >= vela[va[0]] and fin[va[-1] + 1] >= vela[te[0]]   # y no se purga de más
+
+
+ETIQUETAS = ["y_long", "y_short", "r_long", "r_short", "k_long", "k_short", "to_long", "to_short"]
+
+
+def _perturbar_vela(velas, posicion):
+    velas = velas.copy()
+    velas.loc[posicion, ["open", "high", "low", "close"]] += 0.01
+    return velas
+
+
+@pytest.mark.parametrize("generar", [velas_planas, velas_con_senal], ids=["todo-time-stop", "senal"])
+def test_ninguna_etiqueta_de_train_o_validation_depende_del_test(generar):
+    """Regresión: con el cierre por tiempo en la apertura t+N+1, purgar N filas dejaba que la última operación
+    de validation dependiera de la primera vela del test (y esa operación interviene al elegir el umbral).
+    Con precio plano todas las operaciones cierran por tiempo, así que la fuga aparece seguro si existe."""
+    velas = generar()
+    datos = tm.preparar_datos(velas, POINT)
+    assert generar is not velas_planas or datos["to_long"].all()
+    for tr, va, te in tm.ventanas_walk_forward(datos, config.WF_VENTANAS):
+        perturbado = tm.preparar_datos(_perturbar_vela(velas, datos.index[te[0]]), POINT)
+        for filas in (tr, va):
+            indice = datos.index[filas]
+            pd.testing.assert_frame_equal(datos.loc[indice, ETIQUETAS], perturbado.loc[indice, ETIQUETAS])
+
+
+@pytest.mark.parametrize("generar, corte", [(velas_planas, "2023-12-10"), (velas_con_senal, "2024-03-25")],
+                         ids=["todo-time-stop", "senal"])
+def test_ninguna_etiqueta_del_walk_forward_depende_del_holdout(monkeypatch, generar, corte):
+    monkeypatch.setattr(config, "HOLDOUT_DESDE", corte)
+    velas = generar()
+    wf, holdout = tm.separar_holdout(tm.preparar_datos(velas, POINT))
+    primera_del_holdout = int(velas.index[velas["time"] >= holdout["time"].iloc[0]][0])
+    wf_perturbado, _ = tm.separar_holdout(tm.preparar_datos(_perturbar_vela(velas, primera_del_holdout), POINT))
+    pd.testing.assert_frame_equal(wf[ETIQUETAS], wf_perturbado.loc[wf.index, ETIQUETAS])
 
 
 def test_simular_mono_posicion():
@@ -182,7 +238,8 @@ def test_separar_holdout(monkeypatch):
     wf, holdout = tm.separar_holdout(datos)
     corte = int(datetime(2024, 3, 25, tzinfo=timezone.utc).timestamp())
     assert (wf["time"] < corte).all() and (holdout["time"] >= corte).all() and len(holdout) > 0
-    assert holdout.index[0] - wf.index[-1] > config.MAX_BARS_EN_TRADE   # purga: ninguna etiqueta mira dentro
+    assert (wf["t_fin_etiqueta"] < corte).all()   # purga: ninguna etiqueta mira dentro (las que acabaron pronto
+                                                  # por SL/TP antes del corte se conservan, con razón)
     monkeypatch.setattr(config, "HOLDOUT_DESDE", None)
     wf, holdout = tm.separar_holdout(datos)
     assert len(wf) == len(datos) and len(holdout) == 0

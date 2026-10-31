@@ -29,6 +29,24 @@ def velas_aleatorias(n: int, semilla: int = 0, spread: int = 8) -> pd.DataFrame:
     })
 
 
+def velas_planas(n: int = 3_000, semilla: int = 3) -> pd.DataFrame:
+    """Precio casi plano: ninguna operación toca SL ni TP y todas cierran por tiempo en la apertura t+N+1.
+    Es el peor caso para la purga, porque cada etiqueta depende de su horizonte completo."""
+    rng = np.random.default_rng(semilla)
+    close = 1.1 + rng.normal(0, 0.00001, n)
+    open_ = np.r_[close[0], close[:-1]]
+    return pd.DataFrame({
+        "time": T0 + 900 * np.arange(n),
+        "open": open_,
+        "close": close,
+        "high": np.maximum(open_, close) + 0.0002,
+        "low": np.minimum(open_, close) - 0.0002,
+        "tick_volume": rng.integers(200, 600, n).astype(float),
+        "spread": 2,
+        "real_volume": 0,
+    })
+
+
 def velas_con_senal(n: int = 15_000, semilla: int = 1) -> pd.DataFrame:
     """Picos de volumen seguidos de 12 velas de deriva alcista: una ventaja real que el modelo debe encontrar."""
     rng = np.random.default_rng(semilla)

@@ -43,6 +43,10 @@ def etiquetar_triple_barrera(df: pd.DataFrame, point: float, sl_mult: float, tp_
       r_<lado>  resultado en múltiplos del riesgo (R), neto de costes
       k_<lado>  posición de la última vela con el trade abierto
       to_<lado> True si se cerró por time stop
+    y para la fila:
+      fin_etiqueta    posición de la última vela de la que depende la etiqueta (de cualquiera de los dos lados):
+                      la del SL/TP, o la `t+n+1` cuya apertura cierra el time stop
+      t_fin_etiqueta  `time` de esa vela (hora del servidor)
     Las velas son bid: la compra entra al ask y sale al bid; la venta entra al bid y sale al ask.
     Si una vela toca TP y SL a la vez, cuenta como SL. El time stop cierra en la apertura de la vela
     `t+n+1`, como el bot, que cierra al detectar esa vela. Costes: comisión y deslizamiento (en la entrada
@@ -56,6 +60,7 @@ def etiquetar_triple_barrera(df: pd.DataFrame, point: float, sl_mult: float, tp_
 
     res = {f"{campo}_{lado}": np.full(m, np.nan) for lado in LADOS for campo in ("y", "r", "k")}
     res.update({f"to_{lado}": np.zeros(m, dtype=bool) for lado in LADOS})
+    res.update({"fin_etiqueta": np.full(m, np.nan), "t_fin_etiqueta": np.full(m, np.nan)})
 
     for t in range(m - n - 1):
         if not np.isfinite(atr[t]) or atr[t] <= 0:
@@ -76,7 +81,8 @@ def etiquetar_triple_barrera(df: pd.DataFrame, point: float, sl_mult: float, tp_
             if h[j] >= tp:
                 y, salida, k, timeout = 1, tp, j, False
                 break
-        noches = noches_de_swap(tiempos[e], tiempos[cierre if timeout else k], swap_3dias)
+        fin_long = cierre if timeout else k
+        noches = noches_de_swap(tiempos[e], tiempos[fin_long], swap_3dias)
         res["y_long"][t], res["k_long"][t], res["to_long"][t] = y, k, timeout
         res["r_long"][t] = (salida - entrada + noches * swap_long_puntos * point) / sl_dist - coste_r
 
@@ -91,25 +97,39 @@ def etiquetar_triple_barrera(df: pd.DataFrame, point: float, sl_mult: float, tp_
             if l[j] + spr[j] <= tp:
                 y, salida, k, timeout = 1, tp, j, False
                 break
-        noches = noches_de_swap(tiempos[e], tiempos[cierre if timeout else k], swap_3dias)
+        fin_short = cierre if timeout else k
+        noches = noches_de_swap(tiempos[e], tiempos[fin_short], swap_3dias)
         res["y_short"][t], res["k_short"][t], res["to_short"][t] = y, k, timeout
         res["r_short"][t] = (entrada - salida + noches * swap_short_puntos * point) / sl_dist - coste_r
+
+        fin = max(fin_long, fin_short)
+        res["fin_etiqueta"][t], res["t_fin_etiqueta"][t] = fin, tiempos[fin]
 
     return pd.DataFrame(res, index=df.index)
 
 
-def ventanas_walk_forward(n_filas: int, n_ventanas: int, purga: int):
-    """Ventanas ancladas sobre `n_ventanas + 3` segmentos iguales del histórico.
+def ventanas_walk_forward(datos: pd.DataFrame, n_ventanas: int):
+    """Ventanas ancladas sobre `n_ventanas + 3` segmentos iguales de las filas de `datos`.
 
     La ventana `k` entrena con los segmentos `[0, k+2)`, valida con el `k+2` y testea con el `k+3`
-    (la última absorbe el resto). Se purgan `purga` filas al final de train y de validation.
+    (la última absorbe el resto). Devuelve posiciones de fila (para `iloc`).
+
+    Purga por el final de cada etiqueta: se quita de train toda fila cuya etiqueta dependa de alguna vela
+    de validation o posterior (`fin_etiqueta` >= vela de la primera fila de validation), y lo mismo en validation
+    respecto a test. Contar N filas no basta: el time stop usa la apertura de la vela `t+N+1`, y los filtros
+    quitan filas, así que N filas no equivalen a N velas.
     """
+    n_filas = len(datos)
+    vela = datos.index.to_numpy()                  # posición de la vela de cada fila en la serie original
+    fin = datos["fin_etiqueta"].to_numpy()
     seg = n_filas // (n_ventanas + 3)
     for k in range(n_ventanas):
         ini_val, ini_test = (k + 2) * seg, (k + 3) * seg
         fin_test = n_filas if k == n_ventanas - 1 else (k + 4) * seg
-        yield (np.arange(0, ini_val - purga),
-               np.arange(ini_val, ini_test - purga),
+        train = np.arange(0, ini_val)
+        val = np.arange(ini_val, ini_test)
+        yield (train[fin[train] < vela[ini_val]],
+               val[fin[val] < vela[ini_test]],
                np.arange(ini_test, fin_test))
 
 
@@ -274,14 +294,14 @@ def preparar_datos(velas: pd.DataFrame, point: float, costes: dict | None = None
 def separar_holdout(datos: pd.DataFrame):
     """(walk-forward, holdout) según HOLDOUT_DESDE.
 
-    Se purgan las N últimas filas antes del corte, para que ninguna etiqueta del walk-forward use precios del
-    holdout. Con HOLDOUT_DESDE = None no hay holdout, y el criterio de despliegue no puede cumplirse.
+    El walk-forward solo conserva las filas cuya etiqueta termina antes del corte (`t_fin_etiqueta`), así que
+    ninguna usa precios del holdout. Con HOLDOUT_DESDE = None no hay holdout, y el criterio de despliegue no
+    puede cumplirse.
     """
     if config.HOLDOUT_DESDE is None:
         return datos, datos.iloc[0:0]
     corte = int(datetime.strptime(config.HOLDOUT_DESDE, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp())
-    previo = datos[datos["time"] < corte]
-    return previo.iloc[:-config.MAX_BARS_EN_TRADE], datos[datos["time"] >= corte]
+    return datos[datos["t_fin_etiqueta"] < corte], datos[datos["time"] >= corte]
 
 
 def entrenar_ventana(train: pd.DataFrame, val: pd.DataFrame, test: pd.DataFrame, semilla: int = 42) -> dict:
@@ -317,7 +337,7 @@ def fecha(time_mt5) -> str:
 def walk_forward(datos: pd.DataFrame, semilla: int, mostrar: bool = False) -> list[dict]:
     """Las ventanas del walk-forward con una semilla del Random Forest."""
     ventanas = []
-    particiones = ventanas_walk_forward(len(datos), config.WF_VENTANAS, config.MAX_BARS_EN_TRADE)
+    particiones = ventanas_walk_forward(datos, config.WF_VENTANAS)
     for n, (i_train, i_val, i_test) in enumerate(particiones, start=1):
         train, val, test = datos.iloc[i_train], datos.iloc[i_val], datos.iloc[i_test]
         ventana = entrenar_ventana(train, val, test, semilla)
@@ -449,7 +469,7 @@ def main() -> None:
         raise SystemExit(f"No se pudo conectar con MT5: {mt5.last_error()}")
     try:
         info = mt5.symbol_info(config.SYMBOL)
-        velas = mt5_utils.descargar_velas(1, config.VELAS_HISTORICO)
+        velas = mt5_utils.descargar_cerradas_al_dia(config.VELAS_HISTORICO)
     finally:
         mt5.shutdown()
     costes = costes_de_simbolo(info)
