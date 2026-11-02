@@ -13,6 +13,7 @@ Bot de trading algorítmico automatizado que combina Machine Learning (**Random 
 ├── mt5_utils.py              # Conexión con la terminal y descarga de velas
 ├── train_model.py            # Extracción histórica, etiquetado Triple Barrier y entrenamiento Long/Short
 ├── trading_bot.py            # Bucle de ejecución en tiempo real (detección de nueva vela)
+├── tendencia.py              # Backtest de seguimiento de tendencia por reglas (Donchian) en varios mercados
 ├── models/
 │   ├── random_forest_mt5.pkl # Modelos Long/Short calibrados + umbrales, informe y costes del entrenamiento
 │   └── historico/            # Copia con fecha de cada modelo entrenado
@@ -62,6 +63,10 @@ Bot de trading algorítmico automatizado que combina Machine Learning (**Random 
 La infraestructura está completa: descarga, features, etiquetado Triple Barrier con costes (spread, comisión, deslizamiento y swap), walk-forward purgado con 3 semillas, holdout reservado, calibración, backtest mono-posición, y un bot con time stop, reconciliación de órdenes, verificación de cuenta, instancia única, límites de pérdida y registro de operaciones. La mecánica de órdenes se probó en Demo, y la recuperación ante fallos, con un MT5 simulado (`tests/`).
 
 **No se ha encontrado ventaja.** Entrenado con todo EURUSD M15 desde 2010, el walk-forward (10,5 años fuera de muestra, de 2016 a 2026, con costes y purga por el final de cada etiqueta) da `t` = **−2.47 / −1.47 / −1.49** con las semillas 42 / 1 / 2, con profit factor 0.91. Con solo los últimos 4 años salía entre +1.4 y +1.7, y unas pocas velas de desplazamiento lo cambiaban más de 3 puntos: era suerte, no una ventaja. El holdout lleva 3 operaciones (todas perdedoras), lejos de las 30 necesarias. Una prueba independiente del mismo procedimiento, sin cambios, en 2010–2022 (8 años de test que ningún experimento en M15 había usado) da `t` = −2.21 / −1.25 / −0.30: confirma que no hay ventaja. Por eso el bot exige que el walk-forward pase con todas las semillas **y** que el modelo pase el holdout, que empieza el 2026-10-30 y necesita al menos 30 trades nuevos. Las features predicen muy bien *si* habrá movimiento (ROC-AUC 0.87–0.90), pero no *en qué dirección* (0.51–0.53). Se evaluaron además 13 features extra, 8 configuraciones de SL/TP/N, un breakout sin dirección y 12 combinaciones de mercado y timeframe, sin éxito (detalle en [Entrenamiento.md](Entrenamiento.md)). Por diseño, `trading_bot.py` se niega a arrancar mientras el modelo no tenga ventaja significativa (`EXIGIR_VENTAJA_SIGNIFICATIVA`).
+
+**Seguimiento de tendencia, tampoco.** Las reglas clásicas de canal de Donchian (55/20, stop de 2 ATR), en D1 y H4, sobre 6 mercados (4 pares de Forex, oro y plata), con reglas y criterio fijados de antemano, dan de 2010 a 2023 `t` = −0.27 por trade y −0.09 en la cartera mensual. Ninguna de las 5 comprobaciones llega a `t` = 1 (`python tendencia.py`). Con una cartera diversificada de 13 mercados en 4 sectores (divisas, ETFs de índices, metales y bonos), con el mismo riesgo por sector, da `t` = −0.06 por trade (`python tendencia.py --diversificada`). MetaQuotes-Demo no tiene histórico limpio desde 2010 de índices CFD ni de materias primas. Detalle en la sección 6 de [Entrenamiento.md](Entrenamiento.md).
+
+En cuenta Demo, el bot corrió 8 horas el 2026-11-01 sin errores. Evaluó 32 velas sin ninguna señal, y sus probabilidades coinciden con las recalculadas sobre el histórico.
 
 ---
 

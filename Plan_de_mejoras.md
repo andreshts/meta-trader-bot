@@ -45,7 +45,11 @@ No depende de encontrar ventaja: protege la cuenta en cualquier caso.
 
 - [ ] **1.1 Validación operativa en Demo** (desde el domingo 17:00 CR)
   - Hecho cuando: varias semanas de operación sin incidencias y una comparación de `logs/operaciones.csv` (deslizamiento, spread y swap reales) con lo que supone el backtest.
-  - Resultado:
+  - Resultado parcial (2026-11-01):
+    - El bot corrió 8 h en dos sesiones (18:27–20:27 y 21:02–03:01 CR) sin errores ni desconexiones.
+    - Evaluó 32 velas, todas a tiempo, y no hubo ninguna señal.
+    - Las probabilidades en vivo coinciden con las recalculadas sobre el histórico (diferencia ≤ 0.0005, el redondeo del log).
+    - Pendiente: aún no se ha enviado ninguna orden, y al arrancar se lee una vela vieja de la caché (sin efecto, porque se descarta por retraso).
 - [x] **1.2 Tamaño de posición por volatilidad** (`RIESGO_PCT`, en [trading_bot.py](trading_bot.py)): `lotes = equity × RIESGO_PCT / (distancia al SL / tick_size × tick_value)`, con tope `MAX_LOTES`.
 - [ ] **1.3 Activar el lote por riesgo en Demo**
   - Hoy está en `None` (0.01 fijo).
@@ -141,9 +145,75 @@ La información que no está en OHLC es la más prometedora, porque la direcció
 
 ---
 
+## 📈 Fase 6 — Seguimiento de Tendencia Multi-mercado (otra Fuente de Ventaja)
+
+La dirección de EURUSD M15 no se puede predecir con velas (Fases 2 y 5), y en plazos cortos el spread se come los movimientos. Esta fase cambia de estrategia en vez de modelo: reglas clásicas de seguimiento de tendencia en temporalidades largas y en varios mercados. Está documentada con décadas de datos (p. ej. Moskowitz, Ooi y Pedersen, 2012) y tiene una explicación económica (infrarreacción y sobrerreacción a la información).
+
+- ❌ **6.1 Donchian 55/20 en D1, cartera de 6 mercados** ([tendencia.py](tendencia.py))
+  - **Fijado el 2026-11-02, antes de ver ningún resultado.** No se ajusta ningún parámetro: las reglas son las del "Sistema 2" de las Tortugas (años 80), así que todo el histórico desde 2010 es fuera de muestra.
+  - **Mercados:** EURUSD, GBPUSD, USDJPY, AUDUSD, XAUUSD y XAGUSD (los mismos de la prueba de otros mercados), con el mismo riesgo (1 R) por operación.
+  - **Entrada:** cierre de la vela `t` por encima del máximo de las 55 velas anteriores (long) o por debajo del mínimo (short). Se ejecuta en la apertura de `t+1` al ask (long) o al bid (short), con el deslizamiento de `config.SLIPPAGE_PUNTOS`.
+  - **Stop inicial:** 2 × ATR(20) de Wilder de la vela `t`, fijo y en el servidor. Se dispara dentro de la vela (con el bid el long, con el ask el short) y, si hay hueco, en la apertura.
+  - **Salida:** cierre por debajo del mínimo de las 20 velas anteriores (long) o por encima del máximo (short), ejecutada en la apertura siguiente.
+  - Una posición por mercado, sin piramidar. Tras una salida se puede entrar al lado contrario.
+  - **R** = resultado / distancia al stop inicial, neto de spread, deslizamiento, comisión y swap de cada rollover (triple el miércoles).
+  - **Periodos:** desarrollo de 2010 a 2023. **Holdout** del 2024-01-01 a hoy: se mira una sola vez, al final. Los trades que cruzan el corte no cuentan en ninguno de los dos.
+  - **Métricas:**
+    - por trade: esperanza, `t` y profit factor;
+    - de cartera: resultado diario marcado a mercado y sumado por mes, con `t` mensual, Sharpe anual y drawdown máximo en R. Es la medida principal, porque los trades de mercados correlacionados no son independientes.
+  - **Criterio de éxito (se tienen que cumplir todos):**
+    1. **Desarrollo:** `t ≥ 2` por trade (con ≥ 30 trades) y `t ≥ 2` mensual de cartera. Con 13,6 años, esto equivale a un Sharpe ≥ 0,54.
+    2. **Estabilidad:** resultado positivo en ≥ 60% de los 8 segmentos iguales del desarrollo.
+    3. **Robustez:** esperanza > 0 en el desarrollo con los vecinos 20/10 y 100/50, y con un swap pesimista (2% anual del precio en contra, en los dos lados). Los swaps de MetaQuotes-Demo son mucho menores que los de un broker real, y con operaciones de semanas el swap pesa.
+    4. **Holdout:** esperanza > 0. Se informa su `t`, pero no se exige `t ≥ 2`: en 2,8 años eso pediría un Sharpe > 1,2, que ningún seguimiento de tendencia tiene.
+  - **Informativo (no decide):** las mismas reglas en H4, costes ×3 y el resultado por mercado.
+  - **Variantes:** 1 principal y 5 de comprobación (H4, 20/10, 100/50, swap pesimista, costes ×3). Se cuentan aparte de las ~38 del modelo de M15, porque es otra hipótesis con otros datos.
+  - **Limitación:** el swap histórico real no está disponible, así que se aplica el swap actual del símbolo a todo el periodo.
+  - **Resultado (2026-11-02): sin ventaja.** No cumple ni el desarrollo ni la robustez:
+    - **Principal:** 360 trades con −0.032 R ± 0.121 (`t` = −0.27). La cartera da `t` mensual −0.09 (Sharpe −0.03), con solo 3 de 8 segmentos positivos y un drawdown máximo de 66.7 R.
+    - **Holdout:** +0.100 R (`t` = 0.27, 79 trades), gracias al oro y la plata en 2024–2026.
+    - **Comprobaciones:** ninguna de las 5 llega a `t` = 1. La mejor, 100/50, da +0.206 R (`t` = 0.70) en desarrollo y −0.254 R en el holdout.
+    - **Costes:** no son el problema. Con costes ×3 la esperanza solo baja de −0.032 a −0.040 R, porque en D1 el spread pesa muy poco. El swap pesimista la baja a −0.084 R.
+    - **Cuándo ganó:** de 2012 a 2016 (+50 R entre los segmentos 2 y 3) y perdió de 2017 a 2023. Coincide con la mala década del seguimiento de tendencia (2011–2019) y con que Forex es el sector donde peor funciona.
+    - Detalle en [Entrenamiento.md](Entrenamiento.md), sección 6.
+- ❌ **6.2 Donchian 55/20 en D1, cartera diversificada** ([tendencia.py](tendencia.py) `--diversificada`)
+  - **Fijado el 2026-11-02, antes de ver el histórico de los mercados nuevos y cualquier resultado.** Las reglas son las de 6.1 sin cambios.
+  - **Candidatos:**
+    - **Divisas:** los 7 pares principales (EURUSD, GBPUSD, USDJPY, AUDUSD, USDCAD, USDCHF, NZDUSD).
+    - **Índices:** todos los símbolos del grupo `Indexes`.
+    - **Metales:** los del grupo `Metals` cotizados en dólares (sin cruces como XAUEUR).
+    - **ETFs fijados de antemano**, para sectores sin CFD en MT5: TLT e IEF (bonos del Tesoro de EE. UU.), USO (petróleo), UNG (gas natural) y DBA (agricultura).
+  - **Un símbolo por subyacente:** si hay varias versiones del mismo índice (p. ej. US500 y US500M), se queda la de histórico más largo y, a igualdad, la que no lleva sufijo.
+  - **Inclusión, solo por calidad de datos:**
+    - histórico D1 que empieza a más tardar el 2010-02-01;
+    - ningún hueco de más de 15 días entre velas consecutivas;
+    - ningún cambio de más del 40% entre cierres consecutivos (indica un split no ajustado o datos erróneos).
+    - Los excluidos se listan con el motivo.
+  - **Enmienda (2026-11-02, tras el inventario de datos y antes de ver ningún resultado):** ningún CFD del grupo `Indexes` cumple la calidad de datos. Empiezan entre 2010-08 (CHINA50) y 2022, y los de 2011–2012 tienen huecos de 48–56 días. Para no dejar la cartera sin renta variable, el sector de índices se representa con 4 ETFs fijados ahora: SPY (EE. UU.), EFA (desarrollados fuera de EE. UU.), EWJ (Japón) y EEM (emergentes). Pasan por el mismo filtro de calidad.
+  - **Sectores y pesos:** 5 sectores (divisas, índices, metales, bonos y materias primas), con el mismo riesgo total cada uno y repartido a partes iguales entre sus mercados. Así los índices, que son muchos y están muy correlacionados, no dominan la cartera. Los pesos se normalizan para que la media por mercado sea 1 R, y los R de los trades y de la cartera son ponderados.
+  - **Periodos y criterio:** los mismos 4 puntos de 6.1 (desarrollo con `t ≥ 2` por trade y mensual, ≥ 60% de segmentos positivos, robustez con 20/10, 100/50 y swap pesimista, y holdout positivo).
+  - **Informativo (no decide):** el mismo peso por mercado y costes ×3. H4 no se evalúa: era informativo en 6.1 y muchos ETFs no tienen H4 desde 2010.
+  - **Variantes:** 1 principal y 5 de comprobación. Con 6.1 suman 12 en la Fase 6.
+  - **Resultado (2026-11-02): sin ventaja.** No cumple ningún punto del criterio.
+    - **Cartera que dejó el filtro:** 13 mercados en 4 sectores.
+      - Divisas: los 7 pares.
+      - Índices: EFA y EEM. SPY empieza en 2024, y EWJ tiene un contrasplit 1:4 sin ajustar (+303%).
+      - Metales: oro y plata. Los industriales empiezan en 2023, y el platino y el paladio en 2015.
+      - Bonos: TLT e IEF.
+      - Materias primas, ninguno: USO tiene el contrasplit 1:8 de 2020 sin ajustar (+731%), UNG empieza en 2025 y DBA en 2026.
+    - **Principal:** 789 trades con −0.005 R ± 0.080 (`t` = −0.06). La cartera da `t` mensual 0.11 (Sharpe 0.03), con 3 de 8 segmentos positivos y un drawdown máximo de 67.3 R.
+    - **Comprobaciones:** ninguna llega a `t` = 0.1. Con 20/10, −0.021 R; con 100/50, +0.006 R; con el swap pesimista, −0.096 R.
+    - **Holdout:** −1.121 R en bruto. Ese número está distorsionado por 8 velas de IEF con spreads erróneos del servidor (53–59 dólares, en noviembre y diciembre de 2024). Con ese spread corregido queda en −0.015 R (`t` = −0.05), y sigue sin pasar.
+    - **Por mercado:** los bonos son lo mejor del desarrollo (TLT +0.25 R con `t` = 0.95; IEF +0.19 R). USDCHF es lo peor (−0.37 R, `t` = −2.48).
+    - Detalle en [Entrenamiento.md](Entrenamiento.md), sección 6.
+
+---
+
 ## 📒 Registro de Cambios del Plan
 
 | Fecha | Cambio |
 | :--- | :--- |
 | 2026-10-31 | Plan creado a partir de la lista de propuestas; marcado lo ya hecho y lo ya descartado. |
 | 2026-10-31 | Evaluadas 2.3 (`ADX(14)`, `+DI`, `-DI`), 2.4 (`Multi-timeframe real` H1/H4 cerrado) y su combinación en el walk-forward desde 2010: marcadas ❌ como features del modelo; `adx_wilder` y `mtf_cerrado` quedan en `features.py` con pruebas anti-fuga (111 tests). |
+| 2026-11-02 | Añadida la Fase 6 (seguimiento de tendencia por reglas), con reglas y criterio fijados antes de ver resultados. Evaluada 6.1 (Donchian 55/20 en D1, 6 mercados, y 5 comprobaciones): ❌ sin ventaja. `tendencia.py` con 23 pruebas nuevas (134 tests). |
+| 2026-11-02 | Añadida y evaluada 6.2 (cartera diversificada por sectores; enmienda de los índices con ETFs por falta de datos): ❌ sin ventaja. `tendencia.py --diversificada`, con filtro de calidad, pesos por sector y aviso de spreads erróneos (138 tests). |

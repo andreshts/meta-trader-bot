@@ -231,3 +231,78 @@ bundle = {
 * **Curva ROC-AUC:** Asegurar capacidad discriminativa superior a 0.55 en el set de prueba out-of-sample.
 * **Payoff Ratio, Profit Factor y Drawdown simulados:** Comprobar que la esperanza matemática (considerando comisiones y spread) sea positiva, con un número de operaciones suficiente para que el resultado no sea casualidad.
 * **Significancia de la esperanza (criterio de despliegue):** una media positiva no basta. Con resultados de +2 R / −1 R, cada trade tiene una desviación de ~1.4 R, así que con 150 trades el error estándar de la media es ~±0.11 R. `train_model.py` calcula `t = esperanza / error estándar` sobre **todos los trades fuera de muestra del walk-forward**, y `trading_bot.py` solo arranca si `t >= 2` con al menos 30 trades **y** la esperanza es positiva en al menos el 60% de las ventanas (`WF_MIN_PROP_VENTANAS_POSITIVAS`). Todo el walk-forward se repite con cada semilla de `SEMILLAS_ROBUSTEZ` (42, 1, 2) y **todas** deben cumplirlo, porque la semilla del bosque basta para mover `t` de −0.22 a +0.68 con los mismos datos. El modelo guardado es el de la primera semilla, y además debe pasar en el holdout (sección 4). En las pruebas con ruido puro, una ventana suelta dio +0.39 R (t = 1.65) por azar; el agregado (t = −1.32) y la estabilidad (20% de ventanas positivas) lo bloquearon.
+
+---
+
+## 📈 6. Otra Estrategia: Seguimiento de Tendencia por Reglas
+
+Como la dirección de EURUSD M15 no se puede predecir, se probó otra fuente de ventaja: el seguimiento de tendencia clásico en temporalidades largas y en varios mercados. [tendencia.py](tendencia.py) implementa el backtest y la evaluación. Las reglas, los periodos y el criterio se fijaron antes de ver ningún resultado ([Plan_de_mejoras.md](Plan_de_mejoras.md), Fase 6).
+
+**Reglas** (canal de Donchian, "Sistema 2" de las Tortugas):
+- **Entrada:** cierre por encima del máximo de las 55 velas anteriores (long) o por debajo del mínimo (short), ejecutada en la apertura siguiente.
+- **Stop:** 2 × ATR(20) fijo en el servidor.
+- **Salida:** cierre más allá del canal contrario de 20 velas.
+- **Cartera:** EURUSD, GBPUSD, USDJPY, AUDUSD, XAUUSD y XAGUSD, con 1 R por operación.
+
+No se ajusta ningún parámetro, así que no hay entrenamiento ni walk-forward: todo el histórico desde 2010 es fuera de muestra. El desarrollo va de 2010 a 2023, el holdout de 2024 a hoy, y los trades que cruzan el corte no cuentan en ninguno.
+
+**Costes y medición:**
+- Los mismos costes que la sección 3: spread de la vela, deslizamiento y swap por rollover con triple el miércoles.
+- La medida principal es la cartera marcada a mercado vela a vela y sumada por mes, porque los trades de mercados correlacionados no son independientes.
+- Las pruebas (`tests/test_tendencia.py`) comprueban:
+  - que perturbar precios futuros no cambia ninguna decisión pasada;
+  - la ejecución al ask/bid y el stop con hueco;
+  - el swap y el corte del holdout;
+  - que el marcado a mercado suma el resultado de cada trade;
+  - que una tendencia plantada se detecta y el ruido no.
+
+> [!NOTE]
+> **Resultado: sin ventaja.** Desarrollo de 2010-05 a 2023-12 (164 meses) y holdout de 2024-01 a 2026-10:
+>
+> | Variante | Trades | Esperanza (desarrollo) | `t` trades | `t` mensual | Sharpe | Segmentos + | Holdout |
+> | :--- | ---: | :--- | ---: | ---: | ---: | ---: | :--- |
+> | **D1 55/20 (principal)** | 360 | −0.032 R ± 0.121 | −0.27 | −0.09 | −0.03 | 38% | +0.100 R (`t` = 0.27, 79 trades) |
+> | D1 20/10 | 684 | −0.019 R ± 0.064 | −0.30 | −0.09 | −0.02 | 50% | −0.065 R (`t` = −0.53) |
+> | D1 100/50 | 201 | +0.206 R ± 0.294 | +0.70 | +0.60 | +0.16 | 62% | −0.254 R (`t` = −0.55) |
+> | D1 55/20, swap pesimista (2%/año en contra) | 360 | −0.084 R ± 0.117 | −0.72 | −0.41 | −0.11 | 38% | +0.014 R |
+> | D1 55/20, costes ×3 | 360 | −0.040 R ± 0.121 | −0.33 | −0.14 | −0.04 | 38% | +0.098 R |
+> | H4 55/20 | 2.122 | +0.016 R ± 0.045 | +0.36 | +0.27 | +0.07 | 38% | −0.059 R (`t` = −0.55) |
+>
+> - **Ninguna variante llega a `t` = 1.** El principal no cumple el desarrollo (`t` −0.27 por trade y −0.09 mensual, 3 de 8 segmentos positivos) ni la robustez (20/10 y el swap pesimista pierden).
+> - **Riesgo sin premio:** el drawdown máximo del principal es de 66.7 R. Arriesgando un 0.5% por operación, habría sido una caída de alrededor del 33%.
+> - **Por mercado** (D1, desarrollo): ninguno es significativo. El mejor es USDJPY, con +0.26 R (`t` = 0.67), que se benefició de la tendencia del yen en 2012–2015. AUDUSD es el peor, con −0.26 R (`t` = −1.28).
+> - **Cuándo gana:** ganó de 2012 a 2016 (+22 R y +28 R en los segmentos 2 y 3) y perdió de 2017 a 2023. En el holdout el oro y la plata (+2.9 R y +1.7 R por trade) compensan las pérdidas en Forex. Coincide con lo que se sabe del sector: 2011–2019 fue una mala década para el seguimiento de tendencia, y Forex es donde peor funciona.
+> - **Los costes no son el problema:** en D1 el spread casi no pesa (con costes ×3 la esperanza baja de −0.032 a −0.040 R). Lo que falta es la tendencia misma.
+> - **Diferencia en el holdout de 100/50:** sus trades cerrados pierden (−0.254 R), pero la cartera marcada a mercado gana +41 R. La diferencia son posiciones largas en oro y plata abiertas antes de 2024 o todavía abiertas, que no cuentan como trades cerrados del holdout.
+>
+> **Limitación:** la evidencia publicada del seguimiento de tendencia usa decenas de mercados diversificados (índices, bonos, materias primas y divisas). Aquí hay 4 pares de Forex correlacionados y 2 metales, así que esta prueba no descarta la estrategia en general, sino en este universo.
+
+### Cartera Diversificada por Sectores (`python tendencia.py --diversificada`)
+
+Se repitieron las mismas reglas con todos los mercados de MT5 con histórico D1 limpio desde 2010, y con el mismo riesgo para cada sector, para que los mercados correlacionados no dominen. La regla de inclusión es solo de calidad de datos (`problemas_de_datos`): empezar a más tardar el 2010-02-01, sin huecos de más de 15 días y sin saltos de más del 40% entre cierres.
+
+> [!NOTE]
+> **Datos disponibles en MetaQuotes-Demo** (el motivo por el que el universo se queda corto):
+> - **Índices CFD (23):** ninguno sirve. Empiezan entre 2010-08 y 2022, y los de 2011–2012 tienen huecos de 48–56 días. Por eso se usaron ETFs: EFA y EEM pasan; SPY empieza en 2024 y EWJ tiene un contrasplit 1:4 sin ajustar (+303%).
+> - **Metales:** solo el oro y la plata. Los industriales empiezan en 2023, y el platino y el paladio en 2015, con huecos de 124 días.
+> - **Bonos:** TLT e IEF pasan.
+> - **Materias primas:** ninguna. USO trae el contrasplit 1:8 de 2020 sin ajustar (+731%), UNG empieza en 2025 y DBA en 2026.
+> - **Cartera final:** 13 mercados en 4 sectores (7 divisas a 0.46 R, y 2 índices, 2 metales y 2 bonos a 1.62 R cada uno).
+>
+> **Resultado: sin ventaja.** Desarrollo de 2010-05 a 2023-12:
+>
+> | Variante | Trades | Esperanza (desarrollo) | `t` trades | `t` mensual | Sharpe | Segmentos + |
+> | :--- | ---: | :--- | ---: | ---: | ---: | ---: |
+> | **55/20, mismo riesgo por sector (principal)** | 789 | −0.005 R ± 0.080 | −0.06 | +0.11 | +0.03 | 38% |
+> | 20/10 | 1.535 | −0.021 R ± 0.050 | −0.42 | −0.07 | −0.02 | 50% |
+> | 100/50 | 478 | +0.006 R ± 0.142 | +0.05 | +0.04 | +0.01 | 38% |
+> | 55/20, swap pesimista | 789 | −0.096 R ± 0.076 | −1.25 | −0.52 | −0.14 | 38% |
+> | 55/20, mismo peso por mercado | 789 | −0.055 R ± 0.072 | −0.77 | −0.24 | −0.07 | 38% |
+> | 55/20, costes ×3 | 792 | −0.031 R ± 0.080 | −0.39 | −0.07 | −0.02 | 38% |
+>
+> - **Diversificar no ayudó:** el resultado por trade pasó de −0.032 R (6.1) a −0.005 R, sigue siendo cero, y el drawdown máximo es parecido (67.3 R).
+> - **Por mercado:** los bonos fueron lo mejor del desarrollo (TLT +0.25 R con `t` = 0.95; IEF +0.19 R) y USDCHF lo peor (−0.37 R, `t` = −2.48). Con 13 mercados, que uno salga con |`t`| > 2 es lo que cabe esperar por azar.
+> - **Holdout (2024–2026):** −1.121 R por trade en bruto. Está distorsionado por 8 velas de IEF con spreads erróneos de 53–59 dólares (noviembre y diciembre de 2024): con ese "ask" ficticio, dos shorts pierden −63 R y −53 R. Corrigiendo ese spread, el holdout queda en −0.015 R (`t` = −0.05, 172 trades) y la cartera en −12.1 R. Sigue sin pasar. Desde entonces, el informe avisa de las velas con un spread mayor que el 1% del precio (`velas_con_spread_anomalo`).
+> - **Hueco de datos en EFA:** falta la vela del 2025-04-04, en plena caída por los aranceles. Por eso un long sale en la apertura del 7 de abril con −5.1 R. Con la vela completa habría perdido menos, pero también habría perdido.
+>
+> **Conclusión de la Fase 6:** con los datos que da este servidor, el seguimiento de tendencia clásico no tiene ventaja, ni en 6 mercados ni en 13 diversificados, con 12 variantes en total. Para probarlo de verdad, como en la literatura, harían falta futuros de decenas de mercados (energía, agricultura, tipos e índices) con un histórico limpio y ajustado, que MetaQuotes-Demo no tiene.
