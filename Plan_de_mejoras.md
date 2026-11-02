@@ -13,7 +13,7 @@ Una mejora del modelo (feature, régimen, filtro, re-entrenamiento) solo cuenta 
 1. **Fijar la variante antes de mirar resultados:** qué se añade, con qué parámetros y qué se espera. No se ajustan parámetros viendo el test.
 2. **Walk-forward desde 2010** (`train_model.py`: 5 ventanas, purga por el final de cada etiqueta, 3 semillas), comparando contra la línea base, **con los mismos datos**.
 3. **Criterio:** que suba el ROC-AUC de forma estable entre ventanas **y** que la esperanza agregada mejore con las 3 semillas. Solo se considera ventaja real con `t >= 2` en todas las semillas, y además en el holdout (≥ 30 trades).
-4. **Contar las pruebas.** Cada variante evaluada sobre los mismos datos aumenta la probabilidad de un falso positivo. Llevamos **unas 35 variantes**. Con tantas, un `t` cercano a 2 aislado no significa nada (ver [Entrenamiento.md](Entrenamiento.md)).
+4. **Contar las pruebas.** Cada variante evaluada sobre los mismos datos aumenta la probabilidad de un falso positivo. Llevamos **unas 38 variantes**. Con tantas, un `t` cercano a 2 aislado no significa nada (ver [Entrenamiento.md](Entrenamiento.md)).
 5. **No tocar el holdout** (desde `HOLDOUT_DESDE = 2026-10-30`) para elegir variantes. Solo decide el despliegue final.
 6. **Pruebas automáticas** (`python -m pytest tests`) para el código nuevo, en particular contra fugas de datos del futuro, y documentar el resultado en [Entrenamiento.md](Entrenamiento.md).
 
@@ -71,6 +71,8 @@ Cada una se evalúa con el protocolo, por separado y luego en combinación con l
 - ❌ **Tendencia de temporalidad superior aproximada** (`dist_sma200` ≈ 2 días, `dist_sma800` ≈ 8 días). No mejoró el ROC-AUC.
 - ❌ **Régimen de volatilidad** (`atr_regimen` = ATR / su media de 500 velas, `vol_ratio`). No mejoró.
 - ❌ **Posición en el rango diario y forma de la vela.** No mejoró.
+- ❌ **2.3 ADX(14) con +DI y −DI** (`adx`, `plus_di`, `minus_di` de Wilder en `features.adx_wilder()`, con pruebas anti-fuga). Mejoró la esperanza respecto a la línea base en las 3 semillas (`t` = −1.89 / −0.20 / +0.00 frente a −2.47 / −1.47 / −1.49), pero no subió el ROC-AUC (0.542 / 0.557 en la última ventana; media 0.559 / 0.576) ni alcanzó ventaja significativa. La función queda implementada y probada en `features.py` para la Fase 3.
+- ❌ **2.4 Multi-timeframe real H1 y H4 cerrado** (`rsi_h1`, `dist_sma20_h1`, `rsi_h4`, `dist_sma20_h4` en `features.mtf_cerrado()`, usando exclusivamente bloques superiores cerrados al cierre de `t`, verificado con test de perturbación intra-hora). No subió el ROC-AUC (0.547 / 0.557 en la última ventana; media 0.555 / 0.573) y dio `t` = −1.11 / −2.25 / −1.60. Combinada con 2.3 (18 features) dio `t` = −0.01 / −0.52 / −1.48 y ROC-AUC 0.545 / 0.557.
 
 ### Pendientes
 
@@ -80,13 +82,6 @@ Cada una se evalúa con el protocolo, por separado y luego en combinación con l
   - Resultado:
 - [ ] **2.2 Squeeze**: anchura de las Bandas de Bollinger(20, 2) entre la anchura del Canal de Keltner(20, 1.5×ATR), y una bandera de squeeze activo.
   - Hecho cuando: pasa el protocolo, o se marca ❌.
-  - Resultado:
-- [ ] **2.3 ADX(14) con +DI y −DI**: fuerza de la tendencia y su dirección.
-  - Hecho cuando: pasa el protocolo, o se marca ❌. Lo usa también la Fase 3.
-  - Resultado:
-- [ ] **2.4 Multi-timeframe real**: RSI(14) y distancia a la SMA de H1 y H4, en lugar de las aproximaciones con medias largas de M15.
-  - ⚠️ **Riesgo de fuga:** para la vela M15 `t`, solo se puede usar la última vela H1/H4 **cerrada** al cierre de `t`, nunca la que está en formación. Hace falta una prueba automática que lo verifique (perturbar velas futuras no debe cambiar la feature).
-  - Hecho cuando: hay pruebas contra fugas y pasa el protocolo, o se marca ❌.
   - Resultado:
 
 ---
@@ -151,3 +146,4 @@ La información que no está en OHLC es la más prometedora, porque la direcció
 | Fecha | Cambio |
 | :--- | :--- |
 | 2026-10-31 | Plan creado a partir de la lista de propuestas; marcado lo ya hecho y lo ya descartado. |
+| 2026-10-31 | Evaluadas 2.3 (`ADX(14)`, `+DI`, `-DI`), 2.4 (`Multi-timeframe real` H1/H4 cerrado) y su combinación en el walk-forward desde 2010: marcadas ❌ como features del modelo; `adx_wilder` y `mtf_cerrado` quedan en `features.py` con pruebas anti-fuga (111 tests). |

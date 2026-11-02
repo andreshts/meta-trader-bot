@@ -55,6 +55,84 @@ def test_features_de_tiempo():
     assert np.allclose(f["hora_cos"], np.cos(2 * np.pi * np.array([0, 15, 23]) / 24))
 
 
+def test_adx_wilder_acotado_direccional_y_causal():
+    df = velas_aleatorias(600)
+    adx, plus_di, minus_di = features.adx_wilder(df)
+    f = pd.DataFrame({"adx": adx, "plus_di": plus_di, "minus_di": minus_di})
+    cols_adx = ["adx", "plus_di", "minus_di"]
+    assert f[cols_adx].notna().all().all()
+    for c in cols_adx:
+        assert f[c].between(0.0, 1.0).all()
+    assert (f["plus_di"] + f["minus_di"] <= 1.0 + 1e-12).all()
+
+    # Causalidad estricta: perturbar desde 400 no altera 0..399
+    df2 = df.copy()
+    df2.loc[400:, ["open", "high", "low", "close"]] *= 1.05
+    f2 = pd.DataFrame(dict(zip(cols_adx, features.adx_wilder(df2))))
+    assert np.allclose(f[cols_adx].iloc[:400], f2[cols_adx].iloc[:400])
+
+    # Tendencia alcista monotónica -> +DI > -DI y ADX alto; bajista -> -DI > +DI
+    n = 200
+    subida = pd.DataFrame({
+        "time": 1_700_000_000 + 900 * np.arange(n),
+        "open": 1.10 + 0.0005 * np.arange(n),
+        "close": 1.10 + 0.0005 * (np.arange(n) + 1),
+        "high": 1.10 + 0.0005 * (np.arange(n) + 1) + 0.0001,
+        "low": 1.10 + 0.0005 * np.arange(n) - 0.0001,
+        "tick_volume": 300.0,
+        "spread": 5,
+    })
+    bajada = subida.copy()
+    bajada["open"] = 1.20 - 0.0005 * np.arange(n)
+    bajada["close"] = 1.20 - 0.0005 * (np.arange(n) + 1)
+    bajada["high"] = bajada["open"] + 0.0001
+    bajada["low"] = bajada["close"] - 0.0001
+    adx_s, pdi_s, mdi_s = features.adx_wilder(subida)
+    adx_b, pdi_b, mdi_b = features.adx_wilder(bajada)
+    assert pdi_s.iloc[-1] > mdi_s.iloc[-1] and adx_s.iloc[-1] > 0.7
+    assert mdi_b.iloc[-1] > pdi_b.iloc[-1] and adx_b.iloc[-1] > 0.7
+
+
+def test_mtf_cerrado_sin_fuga_en_vela_en_formacion():
+    """Verifica que para la vela M15 `t`, H1 y H4 solo usan bloques superiores ya cerrados al cierre de `t`.
+    En particular, a las :00, :15 y :30 la vela H1 en curso NO se usa; solo al cierre de :45 (que es :00 de la
+    hora siguiente) queda disponible esa vela H1."""
+    # Alineamos t0 a un múltiplo exacto de 4 horas (14400 s)
+    t0 = (1_700_000_000 // 14400) * 14400
+    df = velas_aleatorias(600)
+    df["time"] = t0 + 900 * np.arange(len(df))
+
+    def calcular_mtf(d):
+        rsi_h1, dist_h1 = features.mtf_cerrado(d, features.SEGUNDOS_H1)
+        rsi_h4, dist_h4 = features.mtf_cerrado(d, features.SEGUNDOS_H4)
+        return pd.DataFrame({
+            "rsi_h1": rsi_h1, "dist_sma20_h1": dist_h1,
+            "rsi_h4": rsi_h4, "dist_sma20_h4": dist_h4,
+        })
+
+    f = calcular_mtf(df)
+    cols_mtf = ["rsi_h1", "dist_sma20_h1", "rsi_h4", "dist_sma20_h4"]
+
+    # En las primeras 3 velas (00:00, 00:15, 00:30) aún no ha cerrado ningún bloque H1; en la 4ª (00:45 -> cierra 01:00) sí
+    assert f["rsi_h1"].iloc[:3].isna().all()
+    # Dentro de una hora (k, k+1, k+2 = :00, :15, :30), el valor H1 debe ser constante e igual al de k-1 (:45 anterior)
+    for k in range(120, 500, 4):
+        assert np.isclose(f["rsi_h1"].iloc[k - 1], f["rsi_h1"].iloc[k])
+        assert np.isclose(f["rsi_h1"].iloc[k], f["rsi_h1"].iloc[k + 1])
+        assert np.isclose(f["rsi_h1"].iloc[k], f["rsi_h1"].iloc[k + 2])
+    # Y tras el calentamiento de H4 (20 bloques H4 = 320 velas M15), no hay NaN
+    assert f[cols_mtf].iloc[320:].notna().all().all()
+
+    # Prueba anti-fuga en mitad de una vela H1 y H4 en formación (corte en :15, índice 401):
+    # Perturbar desde 402 en adelante (que pertenecen a la MISMA hora H1 y al MISMO bloque H4 que 400 y 401)
+    # NO puede cambiar las features MTF en 0..401.
+    for corte in (400, 401, 402, 403):
+        df_pert = df.copy()
+        df_pert.loc[corte + 1:, ["open", "high", "low", "close"]] *= 1.25
+        f_pert = calcular_mtf(df_pert)
+        pd.testing.assert_frame_equal(f[cols_mtf].iloc[:corte + 1], f_pert[cols_mtf].iloc[:corte + 1])
+
+
 # ---------------- etiquetado ----------------
 def barras(filas, atr=0.0010, spread=0, t0=MIERCOLES_23H - 900):
     d = pd.DataFrame(filas, columns=["open", "high", "low", "close"])
