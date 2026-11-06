@@ -1,6 +1,7 @@
 """Ejecuta trading_bot.py durante un tiempo limitado, exclusivamente en la demo Exness autorizada.
 
 Uso: python demo_exness_bot.py --horas 5   (crear logs/PAUSA bloquea nuevas entradas)
+El estado se ve dentro de MT5 con el indicador mql5/RF_Bot_Panel.mq5.
 
 Los ajustes solo existen en este proceso: config.py sigue exigiendo ventaja significativa y apuntando a EURUSD. El
 modelo no tiene ventaja demostrada (ver README.md), así que esto solo sirve para observar la mecánica en Demo.
@@ -15,6 +16,7 @@ import config
 import trading_bot
 from demo_exness_probe import LOGIN, SERVER, SYMBOL, TERMINAL
 from features import build_features
+from panel_mt5 import PanelMT5
 
 SIMBOLO_MODELO = config.SYMBOL
 # El modelo aprendió las sesiones en hora de MetaQuotes-Demo (UTC+2 en horario de invierno de EE. UU.); Exness usa UTC.
@@ -51,12 +53,13 @@ def features_en_hora_del_modelo(velas, point):
     return build_features(velas.assign(time=velas["time"] + DESFASE_MODELO_S), point)
 
 
-def ciclo_con_limite(fin: float):
+def ciclo_con_limite(fin: float, panel: PanelMT5):
     def ciclo(bundle: dict, estado: dict) -> None:
         if time.time() >= fin:
             trading_bot.log.info("Fin de la sesión programada")
             raise SystemExit(0)  # no es una Exception: sale del bucle y cierra la conexión con MT5
         _ciclo(bundle, estado)
+        panel.latido()
     return ciclo
 
 
@@ -64,6 +67,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--horas", type=float, required=True)
     args = parser.parse_args()
+    fin = time.time() + args.horas * 3600
+    panel = PanelMT5(SYMBOL, LOGIN, config.MAGIC_NUMBER, fin)
+
+    def cargar_modelo_y_publicar() -> dict:
+        bundle = cargar_modelo()
+        panel.fijar_umbrales(bundle["umbral_long"], bundle["umbral_short"])
+        return bundle
 
     config.SYMBOL = SYMBOL
     config.MT5_PATH = TERMINAL
@@ -73,13 +83,17 @@ def main() -> None:
     config.OPERACIONES_PATH = LOGS_DIR / "operaciones.csv"
     config.ESTADO_PATH = LOGS_DIR / "estado_bot.json"
     trading_bot.verificar_cuenta = verificar_cuenta
-    trading_bot.cargar_modelo = cargar_modelo
+    trading_bot.cargar_modelo = cargar_modelo_y_publicar
     trading_bot.build_features = features_en_hora_del_modelo
-    trading_bot.ciclo = ciclo_con_limite(time.time() + args.horas * 3600)
+    trading_bot.ciclo = ciclo_con_limite(fin, panel)
+    trading_bot.log.addHandler(panel)
 
     # Evita la suspensión por inactividad mientras dure este proceso; no cambia ningún ajuste de Windows.
     ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
-    trading_bot.main()
+    try:
+        trading_bot.main()
+    finally:
+        panel.detener()
 
 
 if __name__ == "__main__":

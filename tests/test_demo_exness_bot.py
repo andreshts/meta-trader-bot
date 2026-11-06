@@ -32,15 +32,16 @@ def test_el_limite_de_tiempo_termina_sin_ejecutar_el_ciclo(monkeypatch):
     ciclo = Mock()
     monkeypatch.setattr(lanzador, "_ciclo", ciclo)
     with pytest.raises(SystemExit):
-        lanzador.ciclo_con_limite(fin=0)({}, {})
+        lanzador.ciclo_con_limite(0, Mock())({}, {})
     ciclo.assert_not_called()
 
 
-def test_antes_del_limite_ejecuta_el_ciclo(monkeypatch):
-    ciclo = Mock()
+def test_antes_del_limite_ejecuta_el_ciclo_y_da_el_latido(monkeypatch):
+    ciclo, panel = Mock(), Mock()
     monkeypatch.setattr(lanzador, "_ciclo", ciclo)
-    lanzador.ciclo_con_limite(fin=float("inf"))({}, {})
+    lanzador.ciclo_con_limite(float("inf"), panel)({}, {})
     ciclo.assert_called_once()
+    panel.latido.assert_called_once()
 
 
 def test_el_modelo_se_valida_contra_su_simbolo_y_se_restaura(monkeypatch):
