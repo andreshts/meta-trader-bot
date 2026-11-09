@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 import config
+import demo_exness_bot as lanzador
 import mt5_utils
 import panel_mt5
 import trading_bot as tb
@@ -66,6 +67,19 @@ def test_una_apertura_del_bot_aparece_como_ultima_decision(mt5, panel):
     ciclo(mt5, bundle(0.9, 0.1))
     assert len(mt5.enviadas) == 1
     assert leer(panel)["nota"].startswith("Apertura LONG ejecutada")
+
+
+def test_bajar_el_umbral_abre_lo_que_antes_no_abria(mt5, panel):
+    modelo = bundle(0.311, 0.245)
+    ciclo(mt5, modelo)
+    assert mt5.enviadas == []
+
+    lanzador.aplicar_umbral(modelo, 0.30)
+    panel.fijar_umbrales(modelo["umbral_long"], modelo["umbral_short"])
+    ciclo(mt5, modelo)
+    assert len(mt5.enviadas) == 1
+    assert leer(panel)["nota"].startswith("Apertura LONG ejecutada")
+    assert (leer(panel)["umbral_long"], leer(panel)["umbral_short"]) == ("0.30", "0.30")
 
 
 def test_el_criterio_de_decision_coincide_con_el_del_bot(mt5, panel):

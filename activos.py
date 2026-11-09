@@ -1,0 +1,74 @@
+"""Activos que el bot opera en la demo Exness: lo que cambia de uno a otro y la hora común de sus modelos."""
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+import config
+import panel_mt5
+
+LOGS = config.BASE_DIR / "logs" / "exness"
+MODELOS = config.BASE_DIR / "models" / "exness"
+CIERRE_DIARIO_MAX_S = 3 * 3600  # entre la última vela antes del cierre y la primera después
+
+
+@dataclass(frozen=True)
+class Activo:
+    simbolo: str
+    nombre: str
+    magic: int
+    lote_min: float
+    max_spread: int  # en puntos
+    simbolo_modelo: str
+    modelo: Path
+    carpeta: Path  # registro, operaciones y estado de riesgo
+    bloqueo: Path  # impide dos bots sobre el mismo activo
+    panel: Path  # lo que leen el indicador de MT5 y la ventana de configuración
+    cierra_a_diario: bool = True
+    umbrales: tuple | None = None  # (compra, venta) iniciales; si es None están en el .json junto al modelo
+
+    @property
+    def detener(self) -> Path:
+        return self.carpeta / "DETENER"
+
+    @property
+    def salida(self) -> Path:
+        return self.carpeta / "salida.txt"
+
+
+def _activo(simbolo: str, nombre: str, magic: int, lote_min: float, max_spread: int) -> Activo:
+    carpeta = LOGS / simbolo
+    return Activo(simbolo, nombre, magic, lote_min, max_spread, simbolo, MODELOS / f"{simbolo}.pkl", carpeta,
+                  carpeta / "trading_bot.lock", panel_mt5.RUTA.with_name(f"rf_bot_panel_{simbolo}.txt"))
+
+
+# El EUR/USD conserva sus rutas de siempre: su modelo, su estado de riesgo y el bloqueo que evita arrancarlo dos veces.
+EURUSD = Activo("EURUSDm", "EUR/USD", config.MAGIC_NUMBER, 0.01, config.MAX_SPREAD_PUNTOS, config.SYMBOL,
+                config.MODEL_PATH, LOGS, config.LOCK_PATH, panel_mt5.RUTA, cierra_a_diario=False, umbrales=(0.30, 0.30))
+ACTIVOS = {a.simbolo: a for a in (
+    EURUSD,
+    _activo("XAUUSDm", "Oro", 202602, 0.01, 750),
+    _activo("US500m", "S&P 500", 202603, 0.14, 200),
+    _activo("USTECm", "Nasdaq 100", 202604, 0.05, 600),
+    _activo("DE30m", "DAX", 202605, 0.07, 60),
+)}
+
+
+def hora_modelo(tiempos) -> np.ndarray:
+    """Pasa la hora de Exness (UTC) a la de los modelos: UTC+2 o UTC+3 según el horario de EE. UU.
+
+    Es la del servidor con el que se entrenó el EUR/USD. Con ella, el cierre de Nueva York cae siempre a las 00:00 y las
+    sesiones no se mueven una hora al cambiar el horario.
+    """
+    utc = pd.to_datetime(np.asarray(tiempos, dtype=np.int64), unit="s", utc=True)
+    nueva_york = utc.tz_convert("America/New_York").tz_localize(None)
+    return ((nueva_york - pd.Timestamp(0)) // pd.Timedelta(seconds=1)).to_numpy(dtype=np.int64) + 7 * 3600
+
+
+def es_cierre_diario(anterior: int, siguiente: int) -> bool:
+    """True si el salto entre dos velas es la pausa diaria: corto y cruza las 00:00 de la hora de los modelos."""
+    if not 0 < siguiente - anterior <= CIERRE_DIARIO_MAX_S:
+        return False
+    desde, hasta = hora_modelo([anterior, siguiente])
+    return bool(desde // 86400 != hasta // 86400)

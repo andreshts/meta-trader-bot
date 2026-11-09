@@ -6,21 +6,29 @@
 //|                                                                  |
 //| Instalación: copiarlo a <carpeta de datos>\MQL5\Indicators,       |
 //| compilarlo y arrastrarlo desde el Navegador al gráfico.           |
+//|                                                                  |
+//| Uso: se mueve arrastrándolo desde cualquier parte; los botones    |
+//| lo minimizan o lo quitan del gráfico (el bot sigue funcionando).  |
 //+------------------------------------------------------------------+
 #property description "Estado del bot de Python. Solo lectura: no puede enviar órdenes."
-#property version     "1.00"
+#property version     "1.11"
 #property indicator_chart_window
 #property indicator_buffers 0
 #property indicator_plots   0
 
-input int InpX = 10;  // Distancia al borde izquierdo (px)
-input int InpY = 30;  // Distancia al borde superior (px)
-
+#define NOMBRE_CORTO   "RF Bot Panel"
 #define ARCHIVO        "rf_bot_panel.txt"
 #define PREFIJO        "RFPANEL_"
 #define MAX_LATIDO_S   20    // Python publica al menos cada 5 s
+#define X_INICIAL      10
+#define Y_INICIAL      30
 #define ANCHO          350
 #define ALTO           242
+#define ALTO_MINIMIZADO 34
+#define LADO_BOTON     20
+#define X_CERRAR       (ANCHO - 28)
+#define X_MINIMIZAR    (ANCHO - 52)
+#define Y_BOTON        7
 #define MARGEN         12
 #define X_BARRA        112
 #define ANCHO_BARRA    110
@@ -39,13 +47,58 @@ input int InpY = 30;  // Distancia al borde superior (px)
 string g_claves[];
 string g_valores[];
 double g_escala = 1.0;
+int g_x = X_INICIAL, g_y = Y_INICIAL;
+bool g_minimizado = false;
+bool g_pulsado = false, g_arrastrando = false, g_sobre_panel = false;
+int g_agarre_x = 0, g_agarre_y = 0;
+bool g_scroll_original = true, g_eventos_original = false;  // ajustes del gráfico que se restauran al salir
 
 int E(const int valor) { return (int)MathRound(valor * g_escala); }
+
+int AltoActual() { return g_minimizado ? ALTO_MINIMIZADO : ALTO; }
+
+bool Dentro(const int x, const int y, const int izquierda, const int arriba, const int ancho, const int alto)
+{
+   return x >= g_x + E(izquierda) && x < g_x + E(izquierda + ancho) && y >= g_y + E(arriba) && y < g_y + E(arriba + alto);
+}
+
+// Los botones siempre quedan a la vista, aunque se encoja la ventana o se arrastre el panel fuera.
+void LimitarPosicion()
+{
+   g_x = MathMax(0, MathMin(g_x, (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS) - E(ANCHO)));
+   g_y = MathMax(0, MathMin(g_y, (int)ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS, 0) - E(ALTO_MINIMIZADO)));
+}
+
+//--- Posición por gráfico: un indicador se reinicia al cambiar de símbolo o de temporalidad y la perdería.
+string ClavePosicion(const string campo = "") { return PREFIJO + IntegerToString(ChartID()) + "_" + campo; }
+
+void GuardarPosicion()
+{
+   GlobalVariableSet(ClavePosicion("x"), g_x);
+   GlobalVariableSet(ClavePosicion("y"), g_y);
+   GlobalVariableSet(ClavePosicion("minimizado"), g_minimizado);
+}
+
+void CargarPosicion()
+{
+   if(!GlobalVariableCheck(ClavePosicion("x")))
+      return;
+   g_x = (int)GlobalVariableGet(ClavePosicion("x"));
+   g_y = (int)GlobalVariableGet(ClavePosicion("y"));
+   g_minimizado = GlobalVariableGet(ClavePosicion("minimizado")) != 0;
+}
+
+//--- Cada gráfico muestra el bot de su símbolo; si ese símbolo no tiene bot propio, el del archivo general.
+string ArchivoPanel()
+{
+   const string propio = "rf_bot_panel_" + _Symbol + ".txt";
+   return FileIsExist(propio, FILE_COMMON) ? propio : ARCHIVO;
+}
 
 //--- Lectura. Si el archivo no se puede abrir (Python lo está reemplazando) se conserva la lectura anterior.
 void LeerEstado()
 {
-   const int h = FileOpen(ARCHIVO, FILE_READ | FILE_TXT | FILE_ANSI | FILE_COMMON | FILE_SHARE_READ | FILE_SHARE_WRITE, '\t', CP_UTF8);
+   const int h = FileOpen(ArchivoPanel(), FILE_READ | FILE_TXT | FILE_ANSI | FILE_COMMON | FILE_SHARE_READ | FILE_SHARE_WRITE, '\t', CP_UTF8);
    if(h == INVALID_HANDLE)
       return;
    int n = 0;
@@ -86,8 +139,8 @@ void Caja(const string nombre, const int x, const int y, const int ancho, const 
       ObjectSetInteger(0, n, OBJPROP_SELECTABLE, false);
       ObjectSetInteger(0, n, OBJPROP_HIDDEN, true);
    }
-   ObjectSetInteger(0, n, OBJPROP_XDISTANCE, InpX + E(x));
-   ObjectSetInteger(0, n, OBJPROP_YDISTANCE, InpY + E(y));
+   ObjectSetInteger(0, n, OBJPROP_XDISTANCE, g_x + E(x));
+   ObjectSetInteger(0, n, OBJPROP_YDISTANCE, g_y + E(y));
    ObjectSetInteger(0, n, OBJPROP_XSIZE, E(ancho));
    ObjectSetInteger(0, n, OBJPROP_YSIZE, E(alto));
    ObjectSetInteger(0, n, OBJPROP_BGCOLOR, fondo);
@@ -106,12 +159,18 @@ void Texto(const string nombre, const int x, const int y, const string texto, co
       ObjectSetInteger(0, n, OBJPROP_HIDDEN, true);
    }
    ObjectSetInteger(0, n, OBJPROP_ANCHOR, ancla);
-   ObjectSetInteger(0, n, OBJPROP_XDISTANCE, InpX + E(x));
-   ObjectSetInteger(0, n, OBJPROP_YDISTANCE, InpY + E(y));
+   ObjectSetInteger(0, n, OBJPROP_XDISTANCE, g_x + E(x));
+   ObjectSetInteger(0, n, OBJPROP_YDISTANCE, g_y + E(y));
    ObjectSetInteger(0, n, OBJPROP_COLOR, c);
    ObjectSetInteger(0, n, OBJPROP_FONTSIZE, tam);
    ObjectSetString(0, n, OBJPROP_FONT, fuente);
    ObjectSetString(0, n, OBJPROP_TEXT, texto == "" ? " " : texto);  // un texto vacío se mostraría como "Label"
+}
+
+void Boton(const string nombre, const int x, const string simbolo)
+{
+   Caja("boton_" + nombre, x, Y_BOTON, LADO_BOTON, LADO_BOTON, C_BORDE, C_BORDE);
+   Texto("boton_" + nombre + "_simbolo", x + LADO_BOTON / 2, Y_BOTON + LADO_BOTON / 2, simbolo, C_TEXTO, 10, "Segoe UI Semibold", ANCHOR_CENTER);
 }
 
 // La barra llena significa que la probabilidad ha llegado a su umbral.
@@ -175,9 +234,9 @@ void PartirNota(const string nota, string &lineas[])
    }
 }
 
-void Actualizar()
+void Dibujar()
 {
-   LeerEstado();
+   LimitarPosicion();
    const bool hay_datos = ArraySize(g_claves) > 0;
 
    string estado = "SIN DATOS";
@@ -199,9 +258,17 @@ void Actualizar()
       }
    }
 
-   Caja("fondo", 0, 0, ANCHO, ALTO, C_FONDO, C_BORDE);
+   Caja("fondo", 0, 0, ANCHO, AltoActual(), C_FONDO, C_BORDE);
    Texto("titulo", MARGEN, 10, "RF Bot  " + Valor("simbolo"), C_TEXTO, 10, "Segoe UI Semibold");
-   Texto("estado", ANCHO - MARGEN, 11, estado, c_estado, 9, "Segoe UI Semibold", ANCHOR_RIGHT_UPPER);
+   Texto("estado", X_MINIMIZAR - 8, 11, estado, c_estado, 9, "Segoe UI Semibold", ANCHOR_RIGHT_UPPER);
+   Boton("minimizar", X_MINIMIZAR, g_minimizado ? "+" : "–");
+   Boton("cerrar", X_CERRAR, "×");
+   if(g_minimizado)
+   {
+      ChartRedraw();
+      return;
+   }
+
    Texto("cuenta", MARGEN, 31, hay_datos ? "Cuenta " + Valor("cuenta") + "  |  Termina a las " + Valor("fin") : "", C_TENUE);
    Caja("linea_1", MARGEN, 53, ANCHO - 2 * MARGEN, 1, C_BORDE, C_BORDE);
 
@@ -229,11 +296,29 @@ void Actualizar()
    ChartRedraw();
 }
 
+void Actualizar()
+{
+   LeerEstado();
+   Dibujar();
+}
+
+void AlternarMinimizado()
+{
+   g_minimizado = !g_minimizado;
+   GuardarPosicion();
+   ObjectsDeleteAll(0, PREFIJO);  // se recrea en orden para que el fondo quede debajo del resto
+   Dibujar();
+}
+
 //--- Eventos
 int OnInit()
 {
    g_escala = TerminalInfoInteger(TERMINAL_SCREEN_DPI) / 96.0;
-   IndicatorSetString(INDICATOR_SHORTNAME, "RF Bot Panel");
+   IndicatorSetString(INDICATOR_SHORTNAME, NOMBRE_CORTO);
+   g_scroll_original = (bool)ChartGetInteger(0, CHART_MOUSE_SCROLL);
+   g_eventos_original = (bool)ChartGetInteger(0, CHART_EVENT_MOUSE_MOVE);
+   ChartSetInteger(0, CHART_EVENT_MOUSE_MOVE, true);
+   CargarPosicion();
    EventSetTimer(1);
    Actualizar();
    return INIT_SUCCEEDED;
@@ -242,8 +327,61 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    EventKillTimer();
+   ChartSetInteger(0, CHART_MOUSE_SCROLL, g_scroll_original);
+   ChartSetInteger(0, CHART_EVENT_MOUSE_MOVE, g_eventos_original);
+   if(reason == REASON_REMOVE || reason == REASON_CHARTCLOSE)
+      GlobalVariablesDeleteAll(ClavePosicion());
    ObjectsDeleteAll(0, PREFIJO);
    ChartRedraw();
+}
+
+void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
+{
+   if(id == CHARTEVENT_CHART_CHANGE)
+   {
+      Dibujar();
+      return;
+   }
+   if(id != CHARTEVENT_MOUSE_MOVE)
+      return;
+
+   const int x = (int)lparam, y = (int)dparam;
+   const bool pulsado = ((uint)StringToInteger(sparam) & 1) != 0;  // bit 1: botón izquierdo
+   const bool pulsacion = pulsado && !g_pulsado;
+   g_pulsado = pulsado;
+
+   if(g_arrastrando)
+   {
+      if(pulsado)
+      {
+         g_x = x - g_agarre_x;
+         g_y = y - g_agarre_y;
+         Dibujar();
+         return;
+      }
+      g_arrastrando = false;
+      GuardarPosicion();
+   }
+
+   const bool sobre_panel = Dentro(x, y, 0, 0, ANCHO, AltoActual());
+   if(!pulsado && sobre_panel != g_sobre_panel)  // sobre el panel, arrastrar no debe desplazar el gráfico
+   {
+      g_sobre_panel = sobre_panel;
+      ChartSetInteger(0, CHART_MOUSE_SCROLL, !sobre_panel && g_scroll_original);
+   }
+   if(!pulsacion || !sobre_panel)
+      return;
+
+   if(Dentro(x, y, X_CERRAR, Y_BOTON, LADO_BOTON, LADO_BOTON))
+      ChartIndicatorDelete(0, 0, NOMBRE_CORTO);
+   else if(Dentro(x, y, X_MINIMIZAR, Y_BOTON, LADO_BOTON, LADO_BOTON))
+      AlternarMinimizado();
+   else
+   {
+      g_arrastrando = true;
+      g_agarre_x = x - g_x;
+      g_agarre_y = y - g_y;
+   }
 }
 
 void OnTimer() { Actualizar(); }
