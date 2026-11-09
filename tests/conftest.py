@@ -9,7 +9,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # Los tests siempre ven la demo original: una cuenta definida en .env no les afecta (load_dotenv no pisa lo ya definido).
-for _nombre in ("EXNESS_LOGIN", "EXNESS_SERVER", "EXNESS_TERMINAL", "EXNESS_CUENTA_REAL", "EXNESS_EXIGIR_VENTAJA"):
+for _nombre in ("EXNESS_LOGIN", "EXNESS_SERVER", "EXNESS_TERMINAL", "EXNESS_CUENTA_REAL", "EXNESS_EXIGIR_VENTAJA",
+                "TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID"):  # y ningún test envía avisos de verdad
     os.environ[_nombre] = ""
 import config  # noqa: E402
 

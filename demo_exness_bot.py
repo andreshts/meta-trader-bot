@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 import MetaTrader5 as mt5
 import numpy as np
 
+import alertas
 import config
 import trading_bot
 from activos import ACTIVOS, EURUSD, Activo, es_cierre_diario, hora_modelo
@@ -210,13 +211,26 @@ def main() -> None:
     if activo.cierra_a_diario:
         trading_bot.es_salto_de_fin_de_semana = salto_admitido
     trading_bot.log.addHandler(panel)
+    avisos = alertas.crear(f"{activo.simbolo} · {CUENTA.tipo} {CUENTA.login}")  # None sin Telegram configurado
+    if avisos is not None:
+        trading_bot.log.addHandler(avisos)
 
     # Evita la suspensión por inactividad mientras dure este proceso; no cambia ningún ajuste de Windows.
     ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
     try:
         trading_bot.main()
+    except SystemExit as e:
+        if avisos is not None and e.code not in (None, 0):  # las salidas normales ya dejan su línea en el log
+            avisos.avisar(f"🛑 El bot se detuvo: {e.code}")
+        raise
+    except BaseException as e:
+        if avisos is not None:
+            avisos.avisar(f"🛑 El bot se cayó: {type(e).__name__}: {e}")
+        raise
     finally:
         panel.detener()
+        if avisos is not None:
+            avisos.cerrar()
 
 
 if __name__ == "__main__":

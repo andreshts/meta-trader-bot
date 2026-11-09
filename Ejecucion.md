@@ -198,6 +198,29 @@ Como cada activo corre en su proceso, lo que es de la cuenta se comparte entre t
 
 Los límites siguen bloqueando solo entradas nuevas: no cierran posiciones abiertas.
 
+### Avisos por Telegram
+
+`alertas.py` observa el log de cada bot lanzado con `demo_exness_bot.py` y envía los avisos desde otro hilo: una red lenta o caída no frena la operativa, y un envío fallido solo deja una línea en el log. Cada mensaje lleva delante el activo y la cuenta.
+
+Puesta en marcha:
+
+1. En Telegram, hablar con `@BotFather`, enviar `/newbot` y copiar el token a `TELEGRAM_TOKEN` en `.env`.
+2. Escribirle cualquier mensaje al bot recién creado.
+3. `python alertas.py --chat` muestra el identificador de ese chat: copiarlo a `TELEGRAM_CHAT_ID`.
+4. `python alertas.py --probar` envía un mensaje de prueba.
+5. Reiniciar los bots: leen `.env` al arrancar.
+
+| Qué | Cuándo se avisa |
+| :--- | :--- |
+| Arranque, fin de sesión, parada desde la ventana | Siempre |
+| Orden ejecutada (también parcial o confirmada al reconciliar) y cada deal, con su resultado | Siempre |
+| Entrada pendiente resuelta, conexión recuperada | Siempre |
+| Motivo para no abrir entradas (drawdown, pérdida diaria, pausa, topes de la cuenta, estado ilegible) | Al aparecer, y un recordatorio cada 6 h mientras dure |
+| Cualquier otro aviso o error del log (orden rechazada, sin conexión, error en el ciclo) | Al aparecer, y como mucho una vez por hora el mismo, con las veces que se repitió |
+| El bot se detiene con un motivo (cuenta inesperada, modelo sin ventaja, otra instancia) o se cae con una excepción | Siempre |
+
+No se avisan las probabilidades de cada vela ni el filtro de spread. Si el proceso muere sin poder despedirse (se mata desde el Administrador de tareas, se apaga el equipo), no hay aviso: eso requiere un vigilante externo.
+
 ---
 
 ## 🧪 6. Pruebas y Supervisión

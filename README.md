@@ -15,6 +15,7 @@ Bot de trading algorítmico automatizado que combina Machine Learning (**Random 
 ├── trading_bot.py            # Bucle de ejecución en tiempo real (detección de nueva vela)
 ├── cuenta.py                 # Cuenta de Exness (demo o real) para el lanzador por activo, la ventana y train_exness
 ├── riesgo_cuenta.py          # Máximo de equity y turno de apertura compartidos por los bots de una cuenta
+├── alertas.py                # Avisos por Telegram de ejecuciones, límites, errores y paradas
 ├── tendencia.py              # Backtest de seguimiento de tendencia por reglas (Donchian) en varios mercados
 ├── models/
 │   ├── random_forest_mt5.pkl # Modelos Long/Short calibrados + umbrales, informe y costes del entrenamiento
