@@ -61,6 +61,13 @@ SEMILLAS_ROBUSTEZ = (42, 1, 2)  # el walk-forward se repite con cada semilla del
 MAX_LOTES = 1.0           # tope de volumen por operación, también con RIESGO_PCT
 MAX_PERDIDA_DIARIA_PCT = 0.02  # sin nuevas entradas si el bot pierde hoy (día del servidor) este % del balance
 MAX_DRAWDOWN_PCT = 0.10   # sin nuevas entradas si la equity cae este % desde su máximo (persistido)
+# Riesgo a nivel de cuenta, para cuando varios bots (uno por activo) comparten cuenta. Con None no se aplica.
+MAGICS_CUENTA = None          # magics de todos los bots de la cuenta; None = solo MAGIC_NUMBER
+ESTADO_CUENTA_PATH = None     # máximo de equity compartido: el drawdown es el mismo para todos los bots
+BLOQUEO_CUENTA_PATH = None    # turno entre bots: dos no comprueban la exposición y abren a la vez
+ESPERA_TURNO_CUENTA_S = 10    # si otro bot no suelta el turno en este tiempo, no se entra en esta vela
+MAX_POSICIONES_CUENTA = None  # posiciones abiertas a la vez entre todos los bots
+MAX_RIESGO_ABIERTO_PCT = None  # pérdida si todas las posiciones tocan su SL, como fracción de la equity
 SLEEP_S = 2
 REINTENTO_CONEXION_S = 5
 REINTENTO_CIERRE_S = 10   # pausa entre intentos de cierre por time stop si uno falla

@@ -9,6 +9,7 @@ import pytest
 import config
 import demo_exness_bot as lanzador
 from activos import ACTIVOS, EURUSD
+from cuenta import Cuenta
 from features import build_features
 
 
@@ -72,7 +73,8 @@ def lanzar(monkeypatch):
     """Ejecuta main() sin MT5, sin bucle y sin tocar el panel real; devuelve el modelo que recibiría el bot y el panel."""
     tb = lanzador.trading_bot
     for nombre in ("SYMBOL", "MT5_PATH", "EXIGIR_VENTAJA_SIGNIFICATIVA", "PERMITIR_CUENTA_REAL", "MAGIC_NUMBER", "VOLUMEN",
-                   "MAX_SPREAD_PUNTOS", "DESVIACION_SLIPPAGE", "MAX_PERDIDA_DIARIA_PCT", "MAX_DRAWDOWN_PCT"):
+                   "MAX_SPREAD_PUNTOS", "DESVIACION_SLIPPAGE", "MAX_PERDIDA_DIARIA_PCT", "MAX_DRAWDOWN_PCT", "RIESGO_PCT",
+                   "MAGICS_CUENTA", "ESTADO_CUENTA_PATH", "BLOQUEO_CUENTA_PATH", "MAX_RIESGO_ABIERTO_PCT", "MAX_POSICIONES_CUENTA"):
         monkeypatch.setattr(config, nombre, getattr(config, nombre))
     for nombre in ("verificar_cuenta", "cargar_modelo", "build_features", "ciclo", "resultado_del_dia",
                    "es_salto_de_fin_de_semana"):
@@ -184,3 +186,60 @@ def test_el_limite_diario_suma_todos_los_activos_y_nada_ajeno(monkeypatch):
         last_error=lambda: (1, "x"))
     monkeypatch.setattr(lanzador, "mt5", falso)
     assert lanzador.resultado_del_dia() == (-5.0, -1.5)
+
+
+# ---------------- perfil de cuenta y riesgo de la cuenta ----------------
+REAL = Cuenta(777, "Exness-MT5Real8", "terminal64.exe", real=True, exigir_ventaja=True)
+
+
+def test_una_cuenta_real_configurada_como_real_se_acepta(cuenta, monkeypatch):
+    monkeypatch.setattr(lanzador, "CUENTA", REAL)
+    monkeypatch.setattr(config, "PERMITIR_CUENTA_REAL", True)
+    cuenta.login, cuenta.server, cuenta.trade_mode = 777, "Exness-MT5Real8", 2
+    assert lanzador.verificar_cuenta() == 777
+
+
+@pytest.mark.parametrize("campo,valor", [("trade_mode", 0), ("login", 778), ("server", "Exness-MT5Real9")])
+def test_con_perfil_real_cualquier_otra_cuenta_detiene_el_bot(cuenta, monkeypatch, campo, valor):
+    monkeypatch.setattr(lanzador, "CUENTA", REAL)
+    monkeypatch.setattr(config, "PERMITIR_CUENTA_REAL", True)
+    cuenta.login, cuenta.server, cuenta.trade_mode = 777, "Exness-MT5Real8", 2
+    setattr(cuenta, campo, valor)
+    with pytest.raises(SystemExit, match="Cuenta inesperada"):
+        lanzador.verificar_cuenta()
+
+
+def test_en_demo_no_se_exige_ventaja_ni_se_permite_cuenta_real(lanzar):
+    lanzar()
+    assert (config.EXIGIR_VENTAJA_SIGNIFICATIVA, config.PERMITIR_CUENTA_REAL) == (False, False)
+
+
+def test_en_real_se_exige_ventaja_y_se_usa_su_terminal(lanzar, monkeypatch):
+    monkeypatch.setattr(lanzador, "CUENTA", REAL)
+    lanzar()
+    assert (config.EXIGIR_VENTAJA_SIGNIFICATIVA, config.PERMITIR_CUENTA_REAL, config.MT5_PATH) == (True, True, "terminal64.exe")
+
+
+def test_el_riesgo_de_la_cuenta_se_comparte_entre_todos_los_activos(lanzar):
+    lanzar("--simbolo", "XAUUSDm", "--riesgo-abierto", "2", "--max-posiciones", "3")
+    assert config.MAGICS_CUENTA == {a.magic for a in ACTIVOS.values()}
+    assert (config.MAX_RIESGO_ABIERTO_PCT, config.MAX_POSICIONES_CUENTA) == (0.02, 3)
+    assert config.ESTADO_CUENTA_PATH.parent == config.BLOQUEO_CUENTA_PATH.parent == lanzador.LOGS  # no en la carpeta del activo
+
+
+def test_sin_topes_de_cuenta_no_se_aplican(lanzar):
+    lanzar()
+    assert (config.MAX_RIESGO_ABIERTO_PCT, config.MAX_POSICIONES_CUENTA, config.RIESGO_PCT) == (None, None, None)
+
+
+def test_el_lote_por_riesgo_sustituye_al_fijo(lanzar):
+    lanzar("--riesgo", "0.5")
+    assert config.RIESGO_PCT == 0.005
+
+
+@pytest.mark.parametrize("argumentos", [("--riesgo", "0.5", "--volumen", "0.02"), ("--max-posiciones", "0"),
+                                        ("--max-posiciones", "1.5"), ("--riesgo-abierto", "0")])
+def test_topes_de_cuenta_no_validos_no_arrancan(lanzar, argumentos):
+    with pytest.raises(SystemExit) as salida:
+        lanzar(*argumentos)
+    assert salida.value.code == 2

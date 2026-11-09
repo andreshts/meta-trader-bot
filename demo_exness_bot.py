@@ -1,4 +1,7 @@
-"""Ejecuta trading_bot.py durante un tiempo limitado, exclusivamente en la demo Exness autorizada.
+"""Ejecuta trading_bot.py durante un tiempo limitado, exclusivamente en la cuenta de Exness configurada (cuenta.py).
+
+Sin configuración es la demo de siempre. Una cuenta real exige EXNESS_CUENTA_REAL=1 y, salvo que se desactive a
+propósito, un modelo con ventaja significativa.
 
 Uso: python demo_exness_bot.py --horas 5 [--simbolo XAUUSDm] [--umbral 0.30]   (crear logs/PAUSA bloquea nuevas entradas)
 La ventana de panel_control.py lanza un proceso de este script por cada activo y arma estos argumentos.
@@ -20,10 +23,11 @@ import numpy as np
 import config
 import trading_bot
 from activos import ACTIVOS, EURUSD, Activo, es_cierre_diario, hora_modelo
-from demo_exness_probe import LOGIN, SERVER, TERMINAL
+from cuenta import CUENTA, LOGS
 from features import build_features
 from panel_mt5 import PanelMT5
 
+LOGIN, SERVER, TERMINAL = CUENTA.login, CUENTA.server, CUENTA.terminal
 DEL_MODELO = object()  # valor por defecto de --umbral-long y --umbral-short: se conserva el del modelo
 ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
 
@@ -34,11 +38,14 @@ _es_salto_de_fin_de_semana = trading_bot.es_salto_de_fin_de_semana
 
 
 def verificar_cuenta(login_esperado=None) -> int:
-    """Además de lo que comprueba el bot, se detiene si no es exactamente la cuenta demo autorizada."""
+    """Además de lo que comprueba el bot, se detiene si no es exactamente la cuenta configurada: mismo número,
+    mismo servidor y mismo tipo (una cuenta real solo vale si se configuró como real, y al revés)."""
     cuenta = mt5.account_info()
-    if cuenta is not None and (cuenta.trade_mode != mt5.ACCOUNT_TRADE_MODE_DEMO
-                               or cuenta.login != LOGIN or cuenta.server != SERVER):
-        raise SystemExit(f"Cuenta inesperada ({cuenta.login}, {cuenta.server}); el bot se detiene")
+    modo = mt5.ACCOUNT_TRADE_MODE_REAL if CUENTA.real else mt5.ACCOUNT_TRADE_MODE_DEMO
+    if cuenta is not None and (cuenta.trade_mode != modo or cuenta.login != CUENTA.login
+                               or cuenta.server != CUENTA.server):
+        raise SystemExit(f"Cuenta inesperada ({cuenta.login}, {cuenta.server}, modo {cuenta.trade_mode}): se esperaba "
+                         f"la {CUENTA.tipo} {CUENTA.login} en {CUENTA.server}; el bot se detiene")
     return _verificar_cuenta(login_esperado)
 
 
@@ -78,6 +85,13 @@ def numero_positivo(texto: str) -> float:
     valor = float(texto)
     if not 0 < valor < math.inf:
         raise argparse.ArgumentTypeError(f"{texto} no es un número positivo")
+    return valor
+
+
+def entero_positivo(texto: str) -> int:
+    valor = int(texto)
+    if valor < 1:
+        raise argparse.ArgumentTypeError(f"{texto} no es un entero positivo")
     return valor
 
 
@@ -132,10 +146,15 @@ def leer_argumentos() -> argparse.Namespace:
     parser.add_argument("--umbral", type=umbral_valido, help="umbral de long y short solo para esta ejecución, ej. 0.30")
     parser.add_argument("--umbral-long", type=umbral_o_apagado, default=DEL_MODELO, help="umbral de compra, u off")
     parser.add_argument("--umbral-short", type=umbral_o_apagado, default=DEL_MODELO, help="umbral de venta, u off")
-    parser.add_argument("--volumen", type=numero_positivo, help="lote de cada operación")
+    lote = parser.add_mutually_exclusive_group()
+    lote.add_argument("--volumen", type=numero_positivo, help="lote fijo de cada operación")
+    lote.add_argument("--riesgo", type=porcentaje, help="lote calculado para arriesgar este %% de la equity por operación")
     parser.add_argument("--max-spread", type=numero_positivo, help="spread máximo para entrar, en puntos")
     parser.add_argument("--perdida-diaria", type=porcentaje, help="pérdida máxima del día, en %% del balance")
     parser.add_argument("--drawdown", type=porcentaje, help="caída máxima desde el máximo de equity, en %%")
+    parser.add_argument("--riesgo-abierto", type=porcentaje,
+                        help="pérdida máxima, en %% de la equity, si todas las posiciones de la cuenta tocan su stop")
+    parser.add_argument("--max-posiciones", type=entero_positivo, help="posiciones abiertas a la vez entre todos los activos")
     return parser.parse_args()
 
 
@@ -144,14 +163,21 @@ def configurar_activo(activo: Activo, args: argparse.Namespace) -> None:
     config.MODEL_PATH = activo.modelo
     config.MAGIC_NUMBER = activo.magic
     config.VOLUMEN = args.volumen or activo.lote_min
+    config.RIESGO_PCT = args.riesgo  # None = lote fijo
     config.MAX_SPREAD_PUNTOS = args.max_spread or activo.max_spread
     # El deslizamiento que se tolera crece con el spread: 20 puntos de EUR/USD serían nada en el oro.
     config.DESVIACION_SLIPPAGE = max(1, round(config.DESVIACION_SLIPPAGE * activo.max_spread / EURUSD.max_spread))
     config.MAX_PERDIDA_DIARIA_PCT = args.perdida_diaria or config.MAX_PERDIDA_DIARIA_PCT
     config.MAX_DRAWDOWN_PCT = args.drawdown or config.MAX_DRAWDOWN_PCT
-    config.MT5_PATH = TERMINAL
-    config.EXIGIR_VENTAJA_SIGNIFICATIVA = False
-    config.PERMITIR_CUENTA_REAL = False
+    config.MT5_PATH = CUENTA.terminal
+    config.EXIGIR_VENTAJA_SIGNIFICATIVA = CUENTA.exigir_ventaja
+    config.PERMITIR_CUENTA_REAL = CUENTA.real
+    # Lo que comparten los bots de todos los activos: el máximo de equity, el turno para abrir y los topes de exposición.
+    config.MAGICS_CUENTA = {a.magic for a in ACTIVOS.values()}
+    config.ESTADO_CUENTA_PATH = LOGS / "riesgo_cuenta.json"
+    config.BLOQUEO_CUENTA_PATH = LOGS / "riesgo_cuenta.lock"
+    config.MAX_RIESGO_ABIERTO_PCT = args.riesgo_abierto
+    config.MAX_POSICIONES_CUENTA = args.max_posiciones
     # El estado de riesgo es por cuenta y activo: el de otra cuenta falsearía el drawdown y el historial de velas.
     config.LOG_PATH = activo.carpeta / "trading_bot.log"
     config.OPERACIONES_PATH = activo.carpeta / "operaciones.csv"
@@ -163,7 +189,7 @@ def main() -> None:
     args = leer_argumentos()
     activo = ACTIVOS[args.simbolo]
     fin = time.time() + args.horas * 3600
-    panel = PanelMT5(activo.simbolo, LOGIN, activo.magic, fin, activo.panel)
+    panel = PanelMT5(activo.simbolo, CUENTA.login, activo.magic, fin, activo.panel)
 
     def cargar_modelo_y_publicar() -> dict:
         bundle = cargar_modelo(activo)

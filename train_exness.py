@@ -18,7 +18,7 @@ import pandas as pd
 import config
 import train_model as tm
 from activos import ACTIVOS, EURUSD, Activo, hora_modelo
-from demo_exness_probe import TERMINAL
+from cuenta import CUENTA
 from features import FEATURES
 
 ENTRENABLES = [s for s in ACTIVOS if s != EURUSD.simbolo]
@@ -83,7 +83,7 @@ def main() -> None:
         parser.error(f"símbolos no válidos: {sorted(desconocidos)}")
     ctypes.windll.kernel32.SetPriorityClass(ctypes.wintypes.HANDLE(-1), BELOW_NORMAL_PRIORITY)  # el bot va primero
 
-    if not mt5.initialize(TERMINAL):
+    if not mt5.initialize(CUENTA.terminal):
         raise SystemExit(f"No se pudo conectar con MT5: {mt5.last_error()}")
     try:
         descargas = {s: (descargar(s), mt5.symbol_info(s)) for s in simbolos}

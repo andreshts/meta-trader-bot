@@ -8,6 +8,7 @@ import logging
 import math
 import os
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
 import joblib
@@ -16,6 +17,7 @@ import numpy as np
 
 import config
 import mt5_utils
+import riesgo_cuenta
 from features import build_features
 from train_model import ventaja_significativa
 
@@ -195,13 +197,63 @@ def calcular_volumen(info, sl_dist: float):
     if config.RIESGO_PCT is None:
         lotes = config.VOLUMEN
     else:
-        perdida_por_lote = sl_dist / info.trade_tick_size * info.trade_tick_value
+        # En símbolos que no cotizan en la moneda de la cuenta, el valor del tick al perder difiere del de ganar.
+        valor_tick = getattr(info, "trade_tick_value_loss", 0.0) or info.trade_tick_value
+        perdida_por_lote = sl_dist / info.trade_tick_size * valor_tick
         lotes = mt5.account_info().equity * config.RIESGO_PCT / perdida_por_lote
     lotes = min(lotes, info.volume_max, config.MAX_LOTES)
     lotes = round(math.floor(lotes / info.volume_step + 1e-9) * info.volume_step, 8)
     if lotes < info.volume_min:
         return None
     return lotes
+
+
+def perdida_en_sl(tipo: int, simbolo: str, volumen: float, precio: float, sl: float) -> float:
+    """Pérdida, en la moneda de la cuenta, si la operación toca su SL. Sin SL no tiene tope: infinito."""
+    if not sl:
+        return math.inf
+    resultado = mt5.order_calc_profit(tipo, simbolo, volumen, precio, sl)
+    if resultado is None:
+        raise RuntimeError(f"order_calc_profit falló en {simbolo}: {mt5.last_error()}")
+    return max(0.0, -resultado)  # un SL que ya asegura beneficio no añade riesgo
+
+
+def exposicion_de_la_cuenta() -> tuple:
+    """(posiciones abiertas, pérdida total si todas tocan su SL) de todos los bots de la cuenta."""
+    posiciones = mt5.positions_get()
+    if posiciones is None:
+        raise RuntimeError(f"positions_get falló: {mt5.last_error()}")
+    magics = config.MAGICS_CUENTA or {config.MAGIC_NUMBER}
+    propias = [p for p in posiciones if p.magic in magics]
+    riesgo = sum(perdida_en_sl(mt5.ORDER_TYPE_BUY if p.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_SELL,
+                               p.symbol, p.volume, p.price_open, p.sl) for p in propias)
+    return len(propias), riesgo
+
+
+def motivo_exposicion(tipo: int, precio: float, sl: float, volumen: float):
+    """Motivo por el que esta entrada no cabe en los límites de la cuenta, o None."""
+    if config.MAX_POSICIONES_CUENTA is None and config.MAX_RIESGO_ABIERTO_PCT is None:
+        return None
+    abiertas, riesgo = exposicion_de_la_cuenta()
+    if config.MAX_POSICIONES_CUENTA is not None and abiertas >= config.MAX_POSICIONES_CUENTA:
+        return f"la cuenta ya tiene {abiertas} posiciones del bot (máximo {config.MAX_POSICIONES_CUENTA})"
+    if config.MAX_RIESGO_ABIERTO_PCT is not None:
+        total = riesgo + perdida_en_sl(tipo, config.SYMBOL, volumen, precio, sl)
+        limite = config.MAX_RIESGO_ABIERTO_PCT * mt5.account_info().equity
+        if total > limite:
+            return (f"el riesgo abierto de la cuenta pasaría a {total:.2f} (límite "
+                    f"{config.MAX_RIESGO_ABIERTO_PCT:.1%} de la equity = {limite:.2f})")
+    return None
+
+
+@contextmanager
+def turno_de_la_cuenta():
+    """Entre comprobar la exposición y enviar la orden no se cuela otro bot de la misma cuenta."""
+    if config.BLOQUEO_CUENTA_PATH is None:
+        yield
+        return
+    with riesgo_cuenta.turno(config.BLOQUEO_CUENTA_PATH, config.ESPERA_TURNO_CUENTA_S):
+        yield
 
 
 def registrar_operacion(fila: dict) -> None:
@@ -310,7 +362,21 @@ def abrir(lado: str, atr: float, info, tick, estado: dict) -> None:
         tipo, precio, sl, tp = mt5.ORDER_TYPE_BUY, tick.ask, tick.ask - sl_dist, tick.ask + tp_dist
     else:
         tipo, precio, sl, tp = mt5.ORDER_TYPE_SELL, tick.bid, tick.bid + sl_dist, tick.bid - tp_dist
+    sl, tp = round(sl, info.digits), round(tp, info.digits)
 
+    try:
+        with turno_de_la_cuenta():
+            motivo = motivo_exposicion(tipo, precio, sl, volumen)
+            if motivo:
+                log.info("Sin entrada: %s", motivo)
+                return
+            _enviar_entrada(lado, tipo, precio, sl, tp, volumen, info, tick, estado)
+    except riesgo_cuenta.CuentaOcupada as e:
+        log.warning("Sin entrada: %s", e)
+
+
+def _enviar_entrada(lado: str, tipo: int, precio: float, sl: float, tp: float, volumen: float, info, tick,
+                    estado: dict) -> None:
     # La intención se persiste ANTES de enviar: si cualquier cosa falla a partir de aquí (una excepción, un
     # corte, un reinicio), queda constancia de que pudo haber una orden y no se abre otra hasta resolverla.
     estado["pendiente"] = {"orden": None, "lado": lado, "enviada_servidor": int(tick.time),
@@ -326,8 +392,8 @@ def abrir(lado: str, atr: float, info, tick, estado: dict) -> None:
         "volume": volumen,
         "type": tipo,
         "price": precio,
-        "sl": round(sl, info.digits),
-        "tp": round(tp, info.digits),
+        "sl": sl,
+        "tp": tp,
         "deviation": config.DESVIACION_SLIPPAGE,
         "magic": config.MAGIC_NUMBER,
         "comment": "rf_mt5",
@@ -535,7 +601,28 @@ def guardar_estado(estado: dict) -> None:
 
 
 def actualizar_equity_max(estado: dict, equity: float) -> None:
-    """Máximo de equity de la cuenta, persistido para que el límite de drawdown sobreviva a reinicios."""
+    """Máximo de equity de la cuenta, persistido para que el límite de drawdown sobreviva a reinicios.
+
+    Con ESTADO_CUENTA_PATH, el máximo es el del archivo que comparten todos los bots de la cuenta: borrarlo
+    reinicia el drawdown de todos con la equity actual. Si está corrupto se bloquean las entradas; si solo no
+    se pudo leer o escribir en esta vuelta, se sigue con el último máximo conocido y se reintenta en la siguiente.
+    """
+    if config.ESTADO_CUENTA_PATH is not None:
+        try:
+            compartido = riesgo_cuenta.subir_equity_max(config.ESTADO_CUENTA_PATH, config.BLOQUEO_CUENTA_PATH, equity)
+        except ValueError as e:
+            if "error_cuenta" not in estado:
+                log.error("Máximo de equity de la cuenta ilegible: %s", e)
+            estado["error_cuenta"] = (f"máximo de equity de la cuenta ilegible ({e}); revisa o borra "
+                                      f"{config.ESTADO_CUENTA_PATH}")
+        except (OSError, riesgo_cuenta.CuentaOcupada):
+            log.debug("No se pudo sincronizar el máximo de equity de la cuenta", exc_info=True)
+        else:
+            estado.pop("error_cuenta", None)
+            if compartido != estado.get("equity_max"):
+                estado["equity_max"] = compartido
+                guardar_estado(estado)
+            return
     if equity > estado.get("equity_max", -math.inf):
         estado["equity_max"] = equity
         guardar_estado(estado)
@@ -549,6 +636,8 @@ def motivo_sin_entradas(estado: dict, cuenta):
                 f"{respaldo.name}; para empezar de cero con la equity actual como máximo, bórralos y reinicia")
     if estado.get("error_estado"):
         return estado["error_estado"]
+    if estado.get("error_cuenta"):
+        return estado["error_cuenta"]
     if estado.get("pendiente"):
         return f"entrada pendiente de resolver (orden {estado['pendiente']['orden']})"
     if ordenes_activas_del_bot():
@@ -557,9 +646,12 @@ def motivo_sin_entradas(estado: dict, cuenta):
         return f"pausa manual (existe {config.PAUSA_PATH})"
     drawdown = (estado["equity_max"] - cuenta.equity) / estado["equity_max"]
     if drawdown >= config.MAX_DRAWDOWN_PCT:
+        if config.ESTADO_CUENTA_PATH is not None:
+            reanudar = f"borra {config.ESTADO_CUENTA_PATH} (reinicia el drawdown de todos los bots de la cuenta)"
+        else:
+            reanudar = f"borra {config.ESTADO_PATH} y {rutas_estado()[2].name}"
         return (f"drawdown de {drawdown:.1%} desde el máximo de equity {estado['equity_max']:.2f} "
-                f"(límite {config.MAX_DRAWDOWN_PCT:.0%}); para reanudar, revisa y borra {config.ESTADO_PATH} "
-                f"y {rutas_estado()[2].name}")
+                f"(límite {config.MAX_DRAWDOWN_PCT:.0%}); para reanudar, revisa y {reanudar}")
     realizado, flotante = resultado_del_dia()
     base = cuenta.balance - realizado  # balance al empezar el día
     perdida = -(realizado + flotante)

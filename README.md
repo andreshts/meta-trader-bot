@@ -13,6 +13,8 @@ Bot de trading algorítmico automatizado que combina Machine Learning (**Random 
 ├── mt5_utils.py              # Conexión con la terminal y descarga de velas
 ├── train_model.py            # Extracción histórica, etiquetado Triple Barrier y entrenamiento Long/Short
 ├── trading_bot.py            # Bucle de ejecución en tiempo real (detección de nueva vela)
+├── cuenta.py                 # Cuenta de Exness (demo o real) para el lanzador por activo, la ventana y train_exness
+├── riesgo_cuenta.py          # Máximo de equity y turno de apertura compartidos por los bots de una cuenta
 ├── tendencia.py              # Backtest de seguimiento de tendencia por reglas (Donchian) en varios mercados
 ├── models/
 │   ├── random_forest_mt5.pkl # Modelos Long/Short calibrados + umbrales, informe y costes del entrenamiento

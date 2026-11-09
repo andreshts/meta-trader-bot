@@ -9,8 +9,9 @@ import pytest
 import demo_exness_bot
 import panel_control as pc
 from activos import Activo
+from operaciones import Instantanea, Operacion
 
-COMUNES = {"horas": "5", "perdida_diaria": "2", "drawdown": "10"}
+COMUNES = {"horas": "5", "perdida_diaria": "2", "drawdown": "10", "riesgo_abierto": "2,5", "max_posiciones": "3"}
 AJUSTES = {"operar": True, "lote": "0.02", "max_spread": "700", "umbral_long": "0,31", "umbral_short": "0.29"}
 
 
@@ -38,13 +39,21 @@ def test_el_comando_normaliza_y_lleva_todos_los_ajustes(activo):
     assert orden[1] == str(pc.LANZADOR)
     argumentos = dict(zip(orden[2::2], orden[3::2]))
     assert argumentos == {"--simbolo": "XAUUSDm", "--horas": "5", "--volumen": "0.02", "--max-spread": "700",
-                          "--umbral-long": "0.31", "--umbral-short": "0.29", "--perdida-diaria": "2", "--drawdown": "10"}
+                          "--umbral-long": "0.31", "--umbral-short": "0.29", "--perdida-diaria": "2", "--drawdown": "10",
+                          "--riesgo-abierto": "2.5", "--max-posiciones": "3"}
 
 
 def test_lo_que_arma_la_ventana_lo_acepta_el_lanzador(activo, monkeypatch):
     monkeypatch.setattr("sys.argv", ["x", *pc.comando(activo, AJUSTES, COMUNES)[2:]])
     args = demo_exness_bot.leer_argumentos()
     assert (args.simbolo, args.volumen, args.umbral_long, args.perdida_diaria) == ("XAUUSDm", 0.02, 0.31, 0.02)
+    assert (args.riesgo_abierto, args.max_posiciones) == (0.025, 3)
+
+
+def test_un_tope_de_cuenta_vacio_no_se_pasa_al_lanzador(activo):
+    orden = pc.comando(activo, AJUSTES, {**COMUNES, "riesgo_abierto": " ", "max_posiciones": ""})
+    assert "--riesgo-abierto" not in orden and "--max-posiciones" not in orden
+    assert "--max-posiciones" not in pc.comando(activo, AJUSTES, {"horas": "5", "perdida_diaria": "2", "drawdown": "10"})
 
 
 def test_un_umbral_vacio_apaga_ese_lado(activo):
@@ -57,6 +66,7 @@ def test_un_umbral_vacio_apaga_ese_lado(activo):
     ({"max_spread": "0"}, {}, "spread"), ({"umbral_long": "1.5"}, {}, "compra"), ({"umbral_short": "nan"}, {}, "venta"),
     ({"umbral_long": "", "umbral_short": ""}, {}, "al menos un umbral"),
     ({}, {"horas": "0"}, "duración"), ({}, {"perdida_diaria": "200"}, "pérdida"), ({}, {"drawdown": ""}, "drawdown"),
+    ({}, {"max_posiciones": "2.5"}, "entero"), ({}, {"max_posiciones": "0"}, "posiciones"), ({}, {"riesgo_abierto": "x"}, "riesgo abierto"),
 ])
 def test_los_ajustes_no_validos_se_explican(activo, cambios, comunes, mensaje):
     with pytest.raises(ValueError, match=mensaje):
@@ -94,7 +104,7 @@ def test_leer_panel_sin_archivo(tmp_path):
 @pytest.fixture
 def raiz():
     try:
-        ventana = tk.Tk()
+        ventana = pc.crear_raiz()
     except tk.TclError as e:
         pytest.skip(f"sin pantalla: {e}")
     ventana.withdraw()
@@ -194,3 +204,90 @@ def test_un_archivo_de_ajustes_roto_no_impide_abrir(abrir, activo, tmp_path):
     (tmp_path / "ajustes.json").write_text("{roto", encoding="utf-8")
     ventana, _, _ = abrir(activo)
     assert ventana.comunes["horas"].get() == "5"
+
+
+def operacion(ticket=1, abierta=False, resultado=5.0, apertura=1_794_000_000):
+    return Operacion(ticket, True, 0.01, apertura, 4000.123, 3990.0, 4020.0, None if abierta else apertura + 900, 4010.5,
+                     "Abierta" if abierta else "Take profit", resultado)
+
+
+def foto(*ops, digitos=3):
+    return Instantanea(list(ops), digitos, "USD")
+
+
+def test_fila_de_operacion_da_formato_y_color():
+    valores, etiqueta = pc.fila_de_operacion(operacion(resultado=-1.5), 3)
+    assert (valores[1], valores[2], valores[3], valores[8], valores[9], etiqueta) == ("Compra", "0.01", "4000.123", "Take profit", "-1.50", "perdida")
+    assert pc.fila_de_operacion(operacion(resultado=2.0), 3)[1] == "ganada"
+    abierta, etiqueta = pc.fila_de_operacion(operacion(abierta=True), 3)
+    assert (abierta[6], etiqueta) == ("", "abierta")
+
+
+def test_el_resumen_cuenta_cerradas_y_abierta():
+    texto = pc.texto_resumen(foto(operacion(1, resultado=5.0), operacion(2, resultado=-2.0), operacion(3, abierta=True, resultado=1.25)))
+    assert texto == "2 cerradas · 1 ganadas · 1 perdidas · resultado +3.00 USD · abierta ahora +1.25 USD"
+    assert pc.texto_resumen(foto()) == "Todavía no hay operaciones de este activo"
+
+
+@pytest.fixture
+def abrir_con_lector(raiz, tmp_path, monkeypatch):
+    def crear(activo_, datos):
+        lecturas = []
+
+        def leer(activos_):
+            lecturas.append([a.simbolo for a in activos_])
+            return {a.simbolo: datos["valor"] for a in activos_}
+        return pc.Ventana(raiz, {activo_.simbolo: activo_}, Mock(), tmp_path / "ajustes.json", leer), lecturas
+    monkeypatch.setattr(pc, "INTERVALO_VISTAS_S", 0)
+    return crear
+
+
+def esperar(raiz, condicion, segundos=5):
+    limite = pc.time.time() + segundos
+    while not condicion() and pc.time.time() < limite:
+        raiz.update()
+        pc.time.sleep(0.01)
+    assert condicion()
+
+
+def test_ver_muestra_las_operaciones_y_las_actualiza(abrir_con_lector, activo, raiz):
+    datos = {"valor": foto(operacion(1, abierta=True, resultado=1.0))}
+    ventana, _ = abrir_con_lector(activo, datos)
+    ventana.filas[0].ver.invoke()
+    vista = ventana.vistas["XAUUSDm"]
+    esperar(raiz, lambda: vista.tabla.exists("1"))
+    assert vista.tabla.item("1", "tags") == ("abierta",)
+
+    datos["valor"] = foto(operacion(2, abierta=True, apertura=1_794_001_000), operacion(1, resultado=5.0))
+    esperar(raiz, lambda: vista.tabla.exists("2"))
+    esperar(raiz, lambda: vista.tabla.item("1", "tags") == ("ganada",))
+    assert vista.tabla.get_children() == ("2", "1")  # la nueva arriba, y la anterior ya cerrada sin duplicarse
+
+
+def test_ver_dos_veces_no_abre_otra_ventana(abrir_con_lector, activo, raiz):
+    ventana, _ = abrir_con_lector(activo, {"valor": foto()})
+    ventana.filas[0].ver.invoke()
+    primera = ventana.vistas["XAUUSDm"]
+    ventana.filas[0].ver.invoke()
+    assert ventana.vistas["XAUUSDm"] is primera
+
+
+def test_si_no_se_puede_leer_lo_dice(abrir_con_lector, activo, raiz):
+    ventana, _ = abrir_con_lector(activo, {"valor": "la terminal no responde"})
+    ventana.filas[0].ver.invoke()
+    vista = ventana.vistas["XAUUSDm"]
+    esperar(raiz, lambda: "la terminal no responde" in vista.resumen.cget("text"))
+
+
+def test_sin_vistas_abiertas_no_se_consulta_mt5(abrir_con_lector, activo, raiz):
+    ventana, lecturas = abrir_con_lector(activo, {"valor": foto()})
+    ventana.filas[0].ver.invoke()
+    esperar(raiz, lambda: lecturas)
+    esperar(raiz, lambda: ventana.lectura is None or ventana.lectura.done())
+    ventana.cerrar_vista("XAUUSDm")
+    ventana._atender_vistas()
+    cuantas = len(lecturas)
+    for _ in range(30):
+        raiz.update()
+        pc.time.sleep(0.01)
+    assert len(lecturas) == cuantas and not ventana.vistas

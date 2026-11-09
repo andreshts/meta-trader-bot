@@ -116,7 +116,7 @@ class FakeMT5:
     def abrir_posicion(self, tipo=None, volumen=0.01, time=None) -> SimpleNamespace:
         pos = SimpleNamespace(ticket=self._nuevo_ticket(), type=_mt5.POSITION_TYPE_BUY if tipo is None else tipo,
                               volume=volumen, time=self.tick.time if time is None else time,
-                              magic=config.MAGIC_NUMBER, price_open=self.tick.ask, sl=1.09, tp=1.12)
+                              magic=config.MAGIC_NUMBER, symbol=config.SYMBOL, price_open=self.tick.ask, sl=1.09, tp=1.12)
         self.posiciones.append(pos)
         return pos
 
@@ -124,6 +124,10 @@ class FakeMT5:
         """El servidor cierra la posición por su SL (sin que el bot envíe nada)."""
         self.posiciones.remove(pos)
         self.deals.append(self._deal(_mt5.DEAL_ENTRY_OUT, self._nuevo_ticket(), pos.ticket, pos.volume, pos.sl, "sl"))
+
+    def order_calc_profit(self, tipo, _simbolo, volumen, precio, precio_cierre):
+        sentido = 1 if tipo == _mt5.ORDER_TYPE_BUY else -1
+        return sentido * (precio_cierre - precio) / self.info.trade_tick_size * self.info.trade_tick_value * volumen
 
     def order_check(self, _request):
         return SimpleNamespace(retcode=0, comment="Done")
@@ -177,7 +181,7 @@ class FakeMT5:
                                          request["comment"]))
         else:  # en MT5 el ticket de la posición es el de la orden que la abrió
             self.posiciones.append(SimpleNamespace(
-                ticket=orden, volume=volumen, time=self.tick.time, magic=request["magic"],
+                ticket=orden, volume=volumen, time=self.tick.time, magic=request["magic"], symbol=request["symbol"],
                 type=_mt5.POSITION_TYPE_BUY if request["type"] == _mt5.ORDER_TYPE_BUY else _mt5.POSITION_TYPE_SELL,
                 price_open=request["price"], sl=request["sl"], tp=request["tp"]))
             self.deals.append(self._deal(_mt5.DEAL_ENTRY_IN, orden, orden, volumen, request["price"], request["comment"]))

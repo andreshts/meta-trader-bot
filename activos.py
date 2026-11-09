@@ -1,4 +1,4 @@
-"""Activos que el bot opera en la demo Exness: lo que cambia de uno a otro y la hora común de sus modelos."""
+"""Activos que el bot opera en la cuenta de Exness (cuenta.py): lo que cambia de uno a otro y la hora común de sus modelos."""
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -6,9 +6,10 @@ import numpy as np
 import pandas as pd
 
 import config
+import cuenta
 import panel_mt5
 
-LOGS = config.BASE_DIR / "logs" / "exness"
+LOGS = cuenta.LOGS  # por cuenta: el estado de riesgo de una no vale para otra
 MODELOS = config.BASE_DIR / "models" / "exness"
 CIERRE_DIARIO_MAX_S = 3 * 3600  # entre la última vela antes del cierre y la primera después
 
@@ -43,9 +44,11 @@ def _activo(simbolo: str, nombre: str, magic: int, lote_min: float, max_spread: 
                   carpeta / "trading_bot.lock", panel_mt5.RUTA.with_name(f"rf_bot_panel_{simbolo}.txt"))
 
 
-# El EUR/USD conserva sus rutas de siempre: su modelo, su estado de riesgo y el bloqueo que evita arrancarlo dos veces.
+# El EUR/USD conserva sus rutas de siempre: su modelo, su estado de riesgo y, en la demo original, el bloqueo que
+# comparte con demo_exness_probe.py.
 EURUSD = Activo("EURUSDm", "EUR/USD", config.MAGIC_NUMBER, 0.01, config.MAX_SPREAD_PUNTOS, config.SYMBOL,
-                config.MODEL_PATH, LOGS, config.LOCK_PATH, panel_mt5.RUTA, cierra_a_diario=False, umbrales=(0.30, 0.30))
+                config.MODEL_PATH, LOGS, config.LOCK_PATH if cuenta.CUENTA.login == cuenta.DEMO.login else LOGS / "trading_bot.lock",
+                panel_mt5.RUTA, cierra_a_diario=False, umbrales=(0.30, 0.30))
 ACTIVOS = {a.simbolo: a for a in (
     EURUSD,
     _activo("XAUUSDm", "Oro", 202602, 0.01, 750),

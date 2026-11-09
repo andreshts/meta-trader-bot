@@ -176,6 +176,28 @@ velas_en_trade = sum(r["time"] + tf_segundos > position.time for r in cerradas)
    * **Si una escritura falla** (disco, permisos, antivirus), no se abren entradas hasta que una escritura posterior funcione.
 7. **Registro:** `logs/operaciones.csv` guarda cada orden (precio pedido y ejecutado, deslizamiento en puntos, spread, volumen, retcode) y cada deal del bot: las entradas, con la comisión que se cobre al entrar, y los cierres, también los de SL y TP en el servidor, con beneficio, swap, comisión y tasas. Sirve para comparar la ejecución real con la simulación. Es un registro de auditoría: si escribirlo falla (disco lleno, permisos, un dato inesperado), se avisa en `logs/trading_bot.log` y la orden y su reconciliación siguen su curso.
 
+### Cuenta de Exness y riesgo a nivel de cuenta
+
+El lanzador por activo (`demo_exness_bot.py`), la ventana (`panel_control.py`) y `train_exness.py` operan sobre la cuenta que define `cuenta.py`. Sin configuración es la demo original. Otra cuenta se indica en `.env` (ver `.env.example`):
+
+| Variable | Significado |
+| :--- | :--- |
+| `EXNESS_LOGIN`, `EXNESS_SERVER` | Número de cuenta y servidor. Van juntos. |
+| `EXNESS_TERMINAL` | Ruta de `terminal64.exe` (opcional). La terminal debe tener ya la sesión iniciada: la contraseña no se escribe en ningún sitio. |
+| `EXNESS_CUENTA_REAL=1` | Obligatorio si la cuenta es real. El bot se detiene si el tipo de la cuenta no coincide con lo declarado, en los dos sentidos. |
+| `EXNESS_EXIGIR_VENTAJA` | Por defecto `1` en real (el bot no arranca con un modelo sin ventaja significativa) y `0` en demo. |
+
+Cada cuenta distinta de la demo original guarda registros y estado en `logs/exness/<login>/`.
+
+Como cada activo corre en su proceso, lo que es de la cuenta se comparte entre todos (`riesgo_cuenta.py`):
+
+* **Máximo de equity:** un solo archivo, `riesgo_cuenta.json`, en la carpeta de la cuenta. El drawdown es el mismo para todos los bots, también para uno recién arrancado. Borrarlo reinicia el drawdown de todos con la equity actual; si está corrupto, no se abren entradas hasta revisarlo.
+* **Turno para abrir:** entre comprobar la exposición y enviar la orden se toma un bloqueo de archivo (`riesgo_cuenta.lock`), para que dos activos con señal en la misma vela no abran a la vez sin verse. Si otro bot no lo suelta en `ESPERA_TURNO_CUENTA_S`, no se entra en esa vela.
+* **Topes de exposición** (`--max-posiciones`, `--riesgo-abierto`; en la ventana, "Posiciones máx." y "Riesgo abierto máx. (%)"): posiciones abiertas a la vez entre todos los activos, y pérdida total si todas tocan su SL (calculada con `order_calc_profit`) más la de la entrada nueva, como % de la equity. Una posición del bot sin SL agota el riesgo abierto. Vacíos, no se aplican.
+* **Lote por riesgo** (`--riesgo`, en % de la equity; excluye a `--volumen`): activa `RIESGO_PCT` para ese activo. Todavía no tiene campo en la ventana.
+
+Los límites siguen bloqueando solo entradas nuevas: no cierran posiciones abiertas.
+
 ---
 
 ## 🧪 6. Pruebas y Supervisión

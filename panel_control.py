@@ -1,4 +1,4 @@
-"""Ventana para configurar, iniciar y detener el bot en cada activo de la demo Exness.
+"""Ventana para configurar, iniciar, detener y ver las operaciones del bot en cada activo de la demo Exness.
 
 Uso: abrir_panel.bat (o python panel_control.py). Cada activo se lanza como un proceso de demo_exness_bot.py, con su
 propio modelo, registro y estado de riesgo; cerrar la ventana no los detiene.
@@ -11,13 +11,16 @@ import subprocess
 import sys
 import time
 import tkinter as tk
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox, ttk
 
 import config
 from activos import ACTIVOS, EURUSD, LOGS, Activo
-from demo_exness_probe import LOGIN, SERVER
+from cuenta import CUENTA
+from operaciones import Instantanea, Operacion, leer_activos
 
 TITULO = "RF Bot: configuración"
 LANZADOR = config.BASE_DIR / "demo_exness_bot.py"
@@ -26,9 +29,15 @@ CREATE_NO_WINDOW = 0x08000000
 INTERVALO_MS = 2000
 MAX_LATIDO_S = 20  # como el indicador de MT5: el bot publica al menos cada 5 s
 MAX_HORAS = 24 * 30
-VERDE, AMBAR, ROJO, GRIS = "#1a7f37", "#9a6700", "#cf222e", "#656d76"
+VERDE, AMBAR, ROJO, GRIS, AZUL = "#1a7f37", "#9a6700", "#cf222e", "#656d76", "#0969da"
+INTERVALO_VISTAS_S = 2
+TICK_VISTAS_MS = 200
+COLUMNAS_VISTA = (("apertura", "Apertura", 115, "w"), ("tipo", "Tipo", 60, "w"), ("lote", "Lote", 50, "e"),
+                  ("entrada", "Entrada", 90, "e"), ("stop", "Stop", 90, "e"), ("objetivo", "Objetivo", 90, "e"),
+                  ("cierre", "Cierre", 115, "w"), ("salida", "Salida / actual", 95, "e"), ("estado", "Estado", 90, "w"),
+                  ("resultado", "Resultado", 80, "e"))
 COMUNES_INICIALES = {"horas": "5", "perdida_diaria": f"{config.MAX_PERDIDA_DIARIA_PCT * 100:g}",
-                     "drawdown": f"{config.MAX_DRAWDOWN_PCT * 100:g}"}
+                     "drawdown": f"{config.MAX_DRAWDOWN_PCT * 100:g}", "riesgo_abierto": "2", "max_posiciones": "3"}
 
 
 def numero(texto: str) -> float:
@@ -57,6 +66,17 @@ def _umbral(texto: str, nombre: str) -> str:
     return _en_rango(texto, nombre, 0.01, 0.99)
 
 
+def _tope(comunes: dict, clave: str, opcion: str, nombre: str, minimo: float, maximo: float, entero: bool = False) -> list[str]:
+    """La opción y su valor, o nada si el campo está vacío: ese tope de la cuenta no se aplica."""
+    texto = comunes.get(clave, "")
+    if not texto.strip():
+        return []
+    valor = _en_rango(texto, nombre, minimo, maximo)
+    if entero and not numero(valor).is_integer():
+        raise ValueError(f"{nombre} debe ser un número entero")
+    return [opcion, valor]
+
+
 def comando(activo: Activo, ajustes: dict, comunes: dict) -> list[str]:
     """Línea de órdenes de demo_exness_bot.py para estos ajustes; ValueError con un mensaje si alguno no vale."""
     umbral_long, umbral_short = _umbral(ajustes["umbral_long"], "El umbral de compra"), _umbral(ajustes["umbral_short"], "El umbral de venta")
@@ -72,6 +92,8 @@ def comando(activo: Activo, ajustes: dict, comunes: dict) -> list[str]:
         "--umbral-short", umbral_short,
         "--perdida-diaria", _en_rango(comunes["perdida_diaria"], "La pérdida diaria", 0.01, 100),
         "--drawdown", _en_rango(comunes["drawdown"], "El drawdown", 0.01, 100),
+        *_tope(comunes, "riesgo_abierto", "--riesgo-abierto", "El riesgo abierto", 0.01, 100),
+        *_tope(comunes, "max_posiciones", "--max-posiciones", "El máximo de posiciones", 1, 100, entero=True),
     ]
 
 
@@ -139,6 +161,70 @@ def estado_del_bot(panel: dict, ahora: float, proceso=None, salida: str = "") ->
     return Estado("Detenido", GRIS, False)
 
 
+def _fecha(tiempo: int) -> str:
+    return datetime.fromtimestamp(tiempo).strftime("%d/%m %H:%M:%S")
+
+
+def fila_de_operacion(op: Operacion, digitos: int) -> tuple:
+    """(valores de las columnas, etiqueta de color)."""
+    precio = lambda valor: f"{valor:.{digitos}f}" if valor else ""  # noqa: E731
+    etiqueta = "abierta" if op.cierre is None else "ganada" if op.resultado > 0 else "perdida"
+    return (_fecha(op.apertura), "Compra" if op.compra else "Venta", f"{op.lote:g}", precio(op.entrada), precio(op.sl),
+            precio(op.tp), _fecha(op.cierre) if op.cierre else "", precio(op.salida), op.motivo, f"{op.resultado:+.2f}"), etiqueta
+
+
+def texto_resumen(datos: Instantanea) -> str:
+    if not datos.operaciones:
+        return "Todavía no hay operaciones de este activo"
+    cerradas = [o for o in datos.operaciones if o.cierre is not None]
+    abiertas = [o for o in datos.operaciones if o.cierre is None]
+    ganadas = sum(o.resultado > 0 for o in cerradas)
+    partes = [f"{len(cerradas)} cerradas", f"{ganadas} ganadas", f"{len(cerradas) - ganadas} perdidas",
+              f"resultado {sum(o.resultado for o in cerradas):+.2f} {datos.moneda}"]
+    if abiertas:
+        partes.append(f"abierta ahora {sum(o.resultado for o in abiertas):+.2f} {datos.moneda}")
+    return " · ".join(partes)
+
+
+class VistaOperaciones:
+    """Ventana con todas las operaciones de un activo; Ventana le pasa cada lectura nueva."""
+
+    def __init__(self, raiz: tk.Tk, activo: Activo, al_cerrar):
+        self.ventana = tk.Toplevel(raiz)
+        self.ventana.title(f"{activo.nombre} ({activo.simbolo}): operaciones")
+        self.ventana.protocol("WM_DELETE_WINDOW", al_cerrar)
+        marco = ttk.Frame(self.ventana, padding=12)
+        marco.pack(fill="both", expand=True)
+        self.resumen = ttk.Label(marco, text="Leyendo MT5…", font=("Segoe UI", 9, "bold"))
+        self.resumen.pack(anchor="w", pady=(0, 8))
+        cuerpo = ttk.Frame(marco)
+        cuerpo.pack(fill="both", expand=True)
+        self.tabla = ttk.Treeview(cuerpo, columns=[c[0] for c in COLUMNAS_VISTA], show="headings", height=14, selectmode="browse")
+        for clave, titulo, ancho, alineacion in COLUMNAS_VISTA:
+            self.tabla.heading(clave, text=titulo, anchor=alineacion)
+            self.tabla.column(clave, width=ancho, anchor=alineacion, stretch=clave in ("apertura", "cierre"))
+        barra = ttk.Scrollbar(cuerpo, orient="vertical", command=self.tabla.yview)
+        self.tabla.configure(yscrollcommand=barra.set)
+        self.tabla.pack(side="left", fill="both", expand=True)
+        barra.pack(side="right", fill="y")
+        for etiqueta, color in (("abierta", AZUL), ("ganada", VERDE), ("perdida", ROJO)):
+            self.tabla.tag_configure(etiqueta, foreground=color)
+
+    def mostrar(self, datos) -> None:
+        """`datos` es una Instantanea, o el motivo por el que no se pudo leer. Actualiza sin perder el scroll ni la selección."""
+        if isinstance(datos, str):
+            self.resumen.configure(text=f"No se pudo leer MT5: {datos}", foreground=ROJO)
+            return
+        self.resumen.configure(text=texto_resumen(datos), foreground="")
+        for indice, op in enumerate(datos.operaciones):
+            iid, (valores, etiqueta) = str(op.ticket), fila_de_operacion(op, datos.digitos)
+            if self.tabla.exists(iid):
+                self.tabla.item(iid, values=valores, tags=(etiqueta,))
+                self.tabla.move(iid, "", indice)
+            else:
+                self.tabla.insert("", indice, iid=iid, values=valores, tags=(etiqueta,))
+
+
 @dataclass
 class Fila:
     activo: Activo
@@ -148,13 +234,17 @@ class Fila:
     estado: ttk.Label
     probabilidades: ttk.Label
     nota: ttk.Label
+    ver: ttk.Button
     detener: ttk.Button
 
 
 class Ventana:
-    def __init__(self, raiz: tk.Tk, activos: dict = ACTIVOS, lanzar=lanzar, ruta_ajustes: Path = RUTA_AJUSTES):
-        self.raiz, self.lanzar, self.ruta_ajustes = raiz, lanzar, ruta_ajustes
+    def __init__(self, raiz: tk.Tk, activos: dict = ACTIVOS, lanzar=lanzar, ruta_ajustes: Path = RUTA_AJUSTES,
+                 leer_operaciones=leer_activos):
+        self.raiz, self.lanzar, self.ruta_ajustes, self.leer_operaciones = raiz, lanzar, ruta_ajustes, leer_operaciones
         self.procesos, self.deteniendo, self.estados = {}, set(), {}
+        self.vistas, self.lectura, self.proxima_lectura = {}, None, 0.0
+        self.lector = ThreadPoolExecutor(max_workers=1)  # un solo hilo: la librería de MT5 tiene una conexión por proceso
         guardados = leer_json(ruta_ajustes)
         raiz.title(TITULO)
         raiz.protocol("WM_DELETE_WINDOW", self.cerrar)
@@ -162,7 +252,8 @@ class Ventana:
         marco = ttk.Frame(raiz, padding=14)
         marco.grid(sticky="nsew")
         raiz.columnconfigure(0, weight=1)
-        ttk.Label(marco, text=f"Cuenta demo {LOGIN} · {SERVER}", foreground=GRIS).grid(sticky="w", pady=(0, 8))
+        ttk.Label(marco, text=f"Cuenta {'REAL' if CUENTA.real else 'demo'} {CUENTA.login} · {CUENTA.server}",
+                  foreground=ROJO if CUENTA.real else GRIS).grid(sticky="w", pady=(0, 8))
 
         tabla = ttk.Frame(marco)
         tabla.grid(sticky="ew")
@@ -179,17 +270,22 @@ class Ventana:
         abajo = ttk.Frame(marco)
         abajo.grid(sticky="ew", pady=(12, 8))
         abajo.columnconfigure(6, weight=1)
-        for columna, (texto, clave) in enumerate((("Duración (horas)", "horas"), ("Pérdida diaria máx. (%)", "perdida_diaria"),
-                                                  ("Drawdown máx. (%)", "drawdown"))):
-            ttk.Label(abajo, text=texto).grid(row=0, column=2 * columna, padx=(0 if columna == 0 else 14, 4))
-            ttk.Entry(abajo, textvariable=self.comunes[clave], width=6, justify="right").grid(row=0, column=2 * columna + 1)
+        campos = ((("Duración (horas)", "horas"), ("Pérdida diaria máx. (%)", "perdida_diaria"), ("Drawdown máx. (%)", "drawdown")),
+                  (("Riesgo abierto máx. (%)", "riesgo_abierto"), ("Posiciones máx.", "max_posiciones")))
+        for fila, linea in enumerate(campos):
+            for columna, (texto, clave) in enumerate(linea):
+                ttk.Label(abajo, text=texto).grid(row=fila, column=2 * columna, padx=(0 if columna == 0 else 14, 4), pady=2, sticky="e")
+                ttk.Entry(abajo, textvariable=self.comunes[clave], width=6, justify="right").grid(row=fila, column=2 * columna + 1)
         ttk.Button(abajo, text="Iniciar marcados", command=self.iniciar).grid(row=0, column=7, padx=(14, 6))
         ttk.Button(abajo, text="Detener todos", command=self.detener_todos).grid(row=0, column=8)
 
         ttk.Label(marco, foreground=GRIS, text="Deja un umbral vacío para no operar ese lado. Cerrar esta ventana no detiene los "
-                                               "bots.\nAl detener un bot, sus posiciones abiertas conservan el stop y el objetivo.",
+                                               "bots.\nAl detener un bot, sus posiciones abiertas conservan el stop y el objetivo.\n"
+                                               "El riesgo abierto y las posiciones máximas cuentan todos los activos de la cuenta; "
+                                               "vacíos, no se aplican.",
                   justify="left").grid(sticky="w")
         self.refrescar()
+        self._atender_vistas()
 
     def _crear_fila(self, tabla: ttk.Frame, n: int, activo: Activo, guardado: dict) -> Fila:
         valores = {**ajustes_iniciales(activo), **guardado}
@@ -207,11 +303,13 @@ class Ventana:
         estado, probabilidades = ttk.Label(tabla, width=30), ttk.Label(tabla, width=20)
         estado.grid(row=n, column=6, sticky="w", padx=6)
         probabilidades.grid(row=n, column=7, sticky="w", padx=6)
-        fila = Fila(activo, variables, casilla, entradas, estado, probabilidades,
-                    ttk.Label(tabla, foreground=GRIS), ttk.Button(tabla, text="Detener", width=9))
-        fila.nota.grid(row=n + 1, column=1, columnspan=8, sticky="w", padx=6, pady=(0, 6))
+        fila = Fila(activo, variables, casilla, entradas, estado, probabilidades, ttk.Label(tabla, foreground=GRIS),
+                    ttk.Button(tabla, text="Ver", width=6), ttk.Button(tabla, text="Detener", width=9))
+        fila.nota.grid(row=n + 1, column=1, columnspan=9, sticky="w", padx=6, pady=(0, 6))
+        fila.ver.configure(command=lambda: self.ver(fila))
+        fila.ver.grid(row=n, column=8, padx=(6, 0))
         fila.detener.configure(command=lambda: self.detener(fila))
-        fila.detener.grid(row=n, column=8, padx=(6, 0))
+        fila.detener.grid(row=n, column=9, padx=(6, 0))
         return fila
 
     def _ajustes(self, fila: Fila) -> dict:
@@ -289,9 +387,46 @@ class Ventana:
         if repetir:
             self.raiz.after(INTERVALO_MS, self.refrescar)
 
+    def ver(self, fila: Fila) -> None:
+        """Abre la vista de operaciones del activo, o la trae al frente si ya estaba abierta."""
+        simbolo = fila.activo.simbolo
+        if simbolo in self.vistas:
+            self.vistas[simbolo].ventana.deiconify()
+            self.vistas[simbolo].ventana.lift()
+            return
+        self.vistas[simbolo] = VistaOperaciones(self.raiz, fila.activo, lambda: self.cerrar_vista(simbolo))
+        self.proxima_lectura = 0.0  # que no espere al siguiente intervalo
+
+    def cerrar_vista(self, simbolo: str) -> None:
+        self.vistas.pop(simbolo).ventana.destroy()
+
+    def _atender_vistas(self) -> None:
+        """La lectura de MT5 va en otro hilo, para que una terminal lenta nunca congele la ventana."""
+        if self.lectura is not None and self.lectura.done():
+            for simbolo, datos in self.lectura.result().items():
+                if simbolo in self.vistas:
+                    self.vistas[simbolo].mostrar(datos)
+            self.lectura, self.proxima_lectura = None, time.monotonic() + INTERVALO_VISTAS_S
+        if self.lectura is None and self.vistas and time.monotonic() >= self.proxima_lectura:
+            activos = [f.activo for f in self.filas if f.activo.simbolo in self.vistas]
+            self.lectura = self.lector.submit(self.leer_operaciones, activos)
+        self.raiz.after(TICK_VISTAS_MS, self._atender_vistas)
+
     def cerrar(self) -> None:
         self.guardar()
+        self.lector.shutdown(wait=False)
         self.raiz.destroy()
+
+
+def crear_raiz(intentos: int = 5) -> tk.Tk:
+    """En Windows, Tcl a veces no consigue leer sus propios archivos al arrancar y al reintentar funciona."""
+    for intento in range(1, intentos + 1):
+        try:
+            return tk.Tk()
+        except tk.TclError:
+            if intento == intentos:
+                raise
+            time.sleep(0.2)
 
 
 def main() -> None:
@@ -299,7 +434,7 @@ def main() -> None:
         ctypes.windll.shcore.SetProcessDpiAwareness(1)  # sin esto Windows la dibuja borrosa en pantallas con escala
     except (AttributeError, OSError):
         pass
-    raiz = tk.Tk()
+    raiz = crear_raiz()
     Ventana(raiz)
     raiz.mainloop()
 
