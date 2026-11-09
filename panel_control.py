@@ -6,8 +6,6 @@ propio modelo, registro y estado de riesgo; cerrar la ventana no los detiene.
 import ctypes
 import json
 import math
-import os
-import subprocess
 import sys
 import time
 import tkinter as tk
@@ -21,13 +19,15 @@ import config
 from activos import ACTIVOS, EURUSD, LOGS, Activo
 from cuenta import CUENTA
 from operaciones import Instantanea, Operacion, leer_activos
+from panel_mt5 import SIN_LIMITE
+from vigilante import dejar_de_desear, desear, horas_de, lanzar, leer_deseados, leer_panel, ultima_linea  # noqa: F401
 
 TITULO = "RF Bot: configuración"
 LANZADOR = config.BASE_DIR / "demo_exness_bot.py"
 RUTA_AJUSTES = LOGS / "panel_control.json"
-CREATE_NO_WINDOW = 0x08000000
 INTERVALO_MS = 2000
 MAX_LATIDO_S = 20  # como el indicador de MT5: el bot publica al menos cada 5 s
+MAX_LATIDO_VIGILANTE_S = 45  # el vigilante publica cada 10 s
 MAX_HORAS = 24 * 30
 VERDE, AMBAR, ROJO, GRIS, AZUL = "#1a7f37", "#9a6700", "#cf222e", "#656d76", "#0969da"
 INTERVALO_VISTAS_S = 2
@@ -85,7 +85,7 @@ def comando(activo: Activo, ajustes: dict, comunes: dict) -> list[str]:
     return [
         str(Path(sys.executable).with_name("python.exe")), str(LANZADOR),
         "--simbolo", activo.simbolo,
-        "--horas", _en_rango(comunes["horas"], "La duración", 0.01, MAX_HORAS),
+        *_tope(comunes, "horas", "--horas", "La duración", 0.01, MAX_HORAS),  # vacía: hasta que se detenga
         "--volumen", _en_rango(ajustes["lote"], "El lote", activo.lote_min, config.MAX_LOTES),
         "--max-spread", _en_rango(ajustes["max_spread"], "El spread máximo", 1, 1_000_000),
         "--umbral-long", umbral_long,
@@ -95,14 +95,6 @@ def comando(activo: Activo, ajustes: dict, comunes: dict) -> list[str]:
         *_tope(comunes, "riesgo_abierto", "--riesgo-abierto", "El riesgo abierto", 0.01, 100),
         *_tope(comunes, "max_posiciones", "--max-posiciones", "El máximo de posiciones", 1, 100, entero=True),
     ]
-
-
-def lanzar(activo: Activo, orden: list[str]) -> subprocess.Popen:
-    """Arranca el bot sin consola. Lo que escriba al salir con error queda en `activo.salida`."""
-    activo.carpeta.mkdir(parents=True, exist_ok=True)
-    with open(activo.salida, "w", encoding="utf-8") as salida:
-        return subprocess.Popen(orden, cwd=config.BASE_DIR, stdin=subprocess.DEVNULL, stdout=salida, stderr=subprocess.STDOUT,
-                                creationflags=CREATE_NO_WINDOW, env={**os.environ, "PYTHONIOENCODING": "utf-8"})
 
 
 def ajustes_iniciales(activo: Activo) -> dict:
@@ -125,21 +117,15 @@ def leer_json(ruta: Path) -> dict:
     return datos if isinstance(datos, dict) else {}
 
 
-def leer_panel(ruta: Path) -> dict:
-    """Lo último que publicó el bot de ese activo; vacío si todavía no hay nada."""
+def texto_vigilante(ruta_latido: Path, ahora: float) -> tuple:
+    """(texto, color) sobre si vigilante.py está en marcha, según el latido que publica."""
     try:
-        texto = ruta.read_text(encoding="utf-8")
-    except (OSError, ValueError):  # el archivo se reemplaza justo en este momento
-        return {}
-    return dict(linea.split("=", 1) for linea in texto.splitlines() if "=" in linea)
-
-
-def ultima_linea(ruta: Path) -> str:
-    try:
-        lineas = [l.strip() for l in ruta.read_text(encoding="utf-8", errors="replace").splitlines() if l.strip()]
-    except OSError:
-        return ""
-    return lineas[-1] if lineas else ""
+        activo = ahora - float(ruta_latido.read_text(encoding="utf-8")) <= MAX_LATIDO_VIGILANTE_S
+    except (OSError, ValueError):
+        activo = False
+    if activo:
+        return "Vigilante en marcha: relanza los bots que se caigan", VERDE
+    return "Vigilante parado: si un bot se cae, no se relanza (iniciar_vigilante.bat)", GRIS
 
 
 @dataclass(frozen=True)
@@ -151,7 +137,8 @@ class Estado:
 
 def estado_del_bot(panel: dict, ahora: float, proceso=None, salida: str = "") -> Estado:
     if panel.get("estado") == "en_marcha" and ahora - float(panel.get("actualizado") or 0) <= MAX_LATIDO_S:
-        return Estado(f"En marcha hasta las {panel.get('fin', '?')}", VERDE, True)
+        fin = panel.get("fin", "?")
+        return Estado("En marcha, sin límite" if fin == SIN_LIMITE else f"En marcha hasta las {fin}", VERDE, True)
     if proceso is not None and proceso.poll() is None:
         return Estado("Arrancando…", AMBAR, True)
     if proceso is not None and proceso.returncode != 0:
@@ -242,6 +229,7 @@ class Ventana:
     def __init__(self, raiz: tk.Tk, activos: dict = ACTIVOS, lanzar=lanzar, ruta_ajustes: Path = RUTA_AJUSTES,
                  leer_operaciones=leer_activos):
         self.raiz, self.lanzar, self.ruta_ajustes, self.leer_operaciones = raiz, lanzar, ruta_ajustes, leer_operaciones
+        self.ruta_deseados = ruta_ajustes.with_name("vigilante.json")  # lo que vigilante.py debe mantener en marcha
         self.procesos, self.deteniendo, self.estados = {}, set(), {}
         self.vistas, self.lectura, self.proxima_lectura = {}, None, 0.0
         self.lector = ThreadPoolExecutor(max_workers=1)  # un solo hilo: la librería de MT5 tiene una conexión por proceso
@@ -282,8 +270,10 @@ class Ventana:
         ttk.Label(marco, foreground=GRIS, text="Deja un umbral vacío para no operar ese lado. Cerrar esta ventana no detiene los "
                                                "bots.\nAl detener un bot, sus posiciones abiertas conservan el stop y el objetivo.\n"
                                                "El riesgo abierto y las posiciones máximas cuentan todos los activos de la cuenta; "
-                                               "vacíos, no se aplican.",
+                                               "vacíos, no se aplican.\nCon la duración vacía, el bot corre hasta que lo detengas.",
                   justify="left").grid(sticky="w")
+        self.vigilante = ttk.Label(marco)
+        self.vigilante.grid(sticky="w", pady=(6, 0))
         self.refrescar()
         self._atender_vistas()
 
@@ -347,13 +337,23 @@ class Ventana:
         self.guardar()
         for fila, orden in por_iniciar:
             self.procesos[fila.activo.simbolo] = self.lanzar(fila.activo, orden)
+            self._apuntar(lambda f=fila, o=orden: desear(self.ruta_deseados, f.activo.simbolo, o,
+                                                        time.time() + horas_de(o) * 3600 if horas_de(o) else None))
         self.refrescar(repetir=False)
 
     def detener(self, fila: Fila) -> None:
         fila.activo.carpeta.mkdir(parents=True, exist_ok=True)
+        self._apuntar(lambda: dejar_de_desear(self.ruta_deseados, fila.activo.simbolo))  # antes: que no lo relancen
         fila.activo.detener.touch()
         self.deteniendo.add(fila.activo.simbolo)
         self.refrescar(repetir=False)
+
+    def _apuntar(self, cambio) -> None:
+        """Un fallo al apuntar para el vigilante no impide iniciar ni detener: solo se avisa."""
+        try:
+            cambio()
+        except Exception as e:
+            messagebox.showwarning(TITULO, f"No se pudo actualizar la lista del vigilante: {e}")
 
     def detener_todos(self) -> None:
         for fila in self.filas:
@@ -384,6 +384,8 @@ class Ventana:
             for entrada in fila.entradas:
                 entrada.configure(state=editable)
             fila.detener.configure(state="normal" if estado.en_marcha and simbolo not in self.deteniendo else "disabled")
+        texto, color = texto_vigilante(self.ruta_deseados.with_name("vigilante.txt"), ahora)
+        self.vigilante.configure(text=texto, foreground=color)
         if repetir:
             self.raiz.after(INTERVALO_MS, self.refrescar)
 

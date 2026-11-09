@@ -219,7 +219,29 @@ Puesta en marcha:
 | Cualquier otro aviso o error del log (orden rechazada, sin conexión, error en el ciclo) | Al aparecer, y como mucho una vez por hora el mismo, con las veces que se repitió |
 | El bot se detiene con un motivo (cuenta inesperada, modelo sin ventaja, otra instancia) o se cae con una excepción | Siempre |
 
-No se avisan las probabilidades de cada vela ni el filtro de spread. Si el proceso muere sin poder despedirse (se mata desde el Administrador de tareas, se apaga el equipo), no hay aviso: eso requiere un vigilante externo.
+No se avisan las probabilidades de cada vela ni el filtro de spread. Un corte de conexión de menos de `AVISO_SIN_CONEXION_S` (60 s) solo queda en el log. Si el proceso muere sin poder despedirse (se mata desde el Administrador de tareas, se apaga el equipo), quien avisa es el vigilante.
+
+### Funcionamiento continuo y vigilante
+
+* **Sesión sin límite:** sin `--horas` (en la ventana, con "Duración" vacía) el bot corre hasta que se detenga, así el time stop no depende de relanzarlo. El panel de MT5 muestra `--:--` como hora de fin.
+* **Sin conexión:** mientras espera a la terminal, el bot sigue publicando su latido y atiende "Detener" y el fin de sesión.
+* **Vigilante (`vigilante.py`, o `iniciar_vigilante.bat`):** la ventana apunta en `vigilante.json` cada bot que inicia, con su línea de órdenes, y lo borra al detenerlo. Cada 10 s el vigilante mira el latido de los apuntados:
+
+| Situación | Qué hace |
+| :--- | :--- |
+| Sin latido en 60 s y sin proceso (se cayó, se mató, se reinició el equipo) | Lo relanza con los mismos ajustes y avisa por Telegram, con la última línea que dejó el bot |
+| Sin latido pero con el proceso vivo (colgado) | Avisa una vez; no lo mata. Avisa también cuando vuelve a responder |
+| Cae 5 veces seguidas (espera 90 s, 180 s, 360 s… entre intentos) | Avisa, lo borra de la lista y no lo relanza más. Cinco minutos en marcha ponen la cuenta a cero |
+| Sesión con duración | La relanza solo por el tiempo que le quedaba; al llegar su hora deja de vigilarla |
+| Detenido desde la ventana | No lo toca: ya no está en la lista |
+
+El vigilante solo lanza procesos de `demo_exness_bot.py`; no envía órdenes ni toca posiciones. Si no está en marcha, todo funciona como antes y la ventana lo indica abajo. Para que arranque al iniciar sesión en Windows (y con él los bots apuntados, que abren la terminal si hace falta):
+
+```bat
+schtasks /Create /TN "RF Bot vigilante" /SC ONLOGON /TR "C:\Otros\metatrader-bot\iniciar_vigilante.bat"
+```
+
+Para quitarlo: `schtasks /Delete /TN "RF Bot vigilante"`. Su registro está en `logs/exness/vigilante.log`.
 
 ---
 

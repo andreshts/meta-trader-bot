@@ -70,6 +70,7 @@ MAX_POSICIONES_CUENTA = None  # posiciones abiertas a la vez entre todos los bot
 MAX_RIESGO_ABIERTO_PCT = None  # pérdida si todas las posiciones tocan su SL, como fracción de la equity
 SLEEP_S = 2
 REINTENTO_CONEXION_S = 5
+AVISO_SIN_CONEXION_S = 60  # un corte más corto solo queda en el log como información
 REINTENTO_CIERRE_S = 10   # pausa entre intentos de cierre por time stop si uno falla
 ESPERA_RECONCILIACION_S = 1  # espera antes de mirar las posiciones tras un resultado incierto de order_send
 PENDIENTE_SIN_RASTRO_S = 600  # una entrada incierta sin rastro en posiciones, órdenes ni historial tras este

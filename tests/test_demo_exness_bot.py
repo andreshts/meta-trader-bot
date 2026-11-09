@@ -77,7 +77,7 @@ def lanzar(monkeypatch):
                    "MAGICS_CUENTA", "ESTADO_CUENTA_PATH", "BLOQUEO_CUENTA_PATH", "MAX_RIESGO_ABIERTO_PCT", "MAX_POSICIONES_CUENTA"):
         monkeypatch.setattr(config, nombre, getattr(config, nombre))
     for nombre in ("verificar_cuenta", "cargar_modelo", "build_features", "ciclo", "resultado_del_dia",
-                   "es_salto_de_fin_de_semana"):
+                   "es_salto_de_fin_de_semana", "al_esperar"):
         monkeypatch.setattr(tb, nombre, getattr(tb, nombre))  # main() los sustituye: así se restauran
     panel, modelo = Mock(), {}
     monkeypatch.setattr(lanzador, "PanelMT5", Mock(return_value=panel))
@@ -243,3 +243,42 @@ def test_topes_de_cuenta_no_validos_no_arrancan(lanzar, argumentos):
     with pytest.raises(SystemExit) as salida:
         lanzar(*argumentos)
     assert salida.value.code == 2
+
+
+# ---------------- sesión sin límite y espera de la conexión ----------------
+def test_sin_horas_la_sesion_no_tiene_fin(monkeypatch):
+    tb = lanzador.trading_bot
+    for nombre in ("verificar_cuenta", "cargar_modelo", "build_features", "ciclo", "resultado_del_dia",
+                   "es_salto_de_fin_de_semana", "al_esperar", "main"):
+        monkeypatch.setattr(tb, nombre, getattr(tb, nombre))
+    for nombre in ("SYMBOL", "MT5_PATH", "EXIGIR_VENTAJA_SIGNIFICATIVA", "PERMITIR_CUENTA_REAL", "MAGIC_NUMBER", "VOLUMEN",
+                   "MAX_SPREAD_PUNTOS", "DESVIACION_SLIPPAGE", "MAX_PERDIDA_DIARIA_PCT", "MAX_DRAWDOWN_PCT", "RIESGO_PCT",
+                   "MAGICS_CUENTA", "ESTADO_CUENTA_PATH", "BLOQUEO_CUENTA_PATH", "MAX_RIESGO_ABIERTO_PCT", "MAX_POSICIONES_CUENTA"):
+        monkeypatch.setattr(config, nombre, getattr(config, nombre))
+    panel = Mock()
+    monkeypatch.setattr(lanzador, "PanelMT5", panel)
+    monkeypatch.setattr(lanzador, "ctypes", Mock())
+    monkeypatch.setattr(lanzador, "_ciclo", Mock())
+    monkeypatch.setattr(tb, "log", Mock())
+    monkeypatch.setattr(tb, "main", lambda: tb.ciclo({}, {}))  # una vuelta: no debe terminar la sesión
+    monkeypatch.setattr(sys, "argv", ["demo_exness_bot.py", "--simbolo", "XAUUSDm"])
+    lanzador.main()
+    assert panel.call_args.args[3] == float("inf")
+    lanzador._ciclo.assert_called_once()
+    assert tb.al_esperar is tb.ciclo.al_esperar
+
+
+def test_mientras_espera_la_conexion_da_el_latido_y_atiende_la_orden_de_detener(tmp_path):
+    panel, archivo = Mock(), tmp_path / "DETENER"
+    al_esperar = lanzador.ciclo_con_limite(float("inf"), panel, archivo).al_esperar
+    al_esperar()
+    panel.latido.assert_called_once()
+    archivo.touch()
+    with pytest.raises(SystemExit) as salida:
+        al_esperar()
+    assert salida.value.code == 0 and not archivo.exists()
+
+
+def test_mientras_espera_la_conexion_tambien_termina_la_sesion():
+    with pytest.raises(SystemExit):
+        lanzador.ciclo_con_limite(0, Mock()).al_esperar()

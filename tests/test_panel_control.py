@@ -85,6 +85,7 @@ VIVO, TERMINADO_MAL, TERMINADO_BIEN = (SimpleNamespace(poll=lambda r=r: r, retur
 
 @pytest.mark.parametrize("panel,proceso,texto,en_marcha", [
     ({"estado": "en_marcha", "actualizado": AHORA - 3, "fin": "18:04"}, None, "En marcha hasta las 18:04", True),
+    ({"estado": "en_marcha", "actualizado": AHORA - 3, "fin": "--:--"}, None, "En marcha, sin límite", True),
     ({"estado": "en_marcha", "actualizado": AHORA - 300, "fin": "18:04"}, VIVO, "Arrancando…", True),
     ({}, VIVO, "Arrancando…", True),
     ({}, TERMINADO_MAL, "No pudo seguir: motivo", False),
@@ -291,3 +292,39 @@ def test_sin_vistas_abiertas_no_se_consulta_mt5(abrir_con_lector, activo, raiz):
         raiz.update()
         pc.time.sleep(0.01)
     assert len(lecturas) == cuantas and not ventana.vistas
+
+
+# ---------------- sesión sin límite y vigilante ----------------
+def test_la_duracion_vacia_lanza_una_sesion_sin_limite(activo, monkeypatch):
+    orden = pc.comando(activo, AJUSTES, {**COMUNES, "horas": ""})
+    assert "--horas" not in orden
+    monkeypatch.setattr("sys.argv", ["x", *orden[2:]])
+    assert demo_exness_bot.leer_argumentos().horas is None
+
+
+def test_iniciar_apunta_el_bot_para_el_vigilante_y_detener_lo_borra(abrir, activo, tmp_path):
+    ventana, lanzar, _ = abrir(activo)
+    marcar(ventana)
+    antes = pc.time.time()
+    ventana.iniciar()
+    apuntado = pc.leer_deseados(tmp_path / "vigilante.json")["XAUUSDm"]
+    assert apuntado["orden"] == lanzar.call_args.args[1]
+    assert antes + 5 * 3600 <= apuntado["fin"] <= pc.time.time() + 5 * 3600  # la duración por defecto: 5 horas
+    ventana.detener(ventana.filas[0])
+    assert pc.leer_deseados(tmp_path / "vigilante.json") == {} and activo.detener.exists()
+
+
+def test_una_sesion_sin_limite_se_apunta_sin_hora_de_fin(abrir, activo, tmp_path):
+    ventana, _, _ = abrir(activo)
+    marcar(ventana)
+    ventana.comunes["horas"].set("")
+    ventana.iniciar()
+    assert pc.leer_deseados(tmp_path / "vigilante.json")["XAUUSDm"]["fin"] is None
+
+
+def test_la_ventana_dice_si_el_vigilante_esta_en_marcha(tmp_path):
+    latido = tmp_path / "vigilante.txt"
+    assert "parado" in pc.texto_vigilante(latido, AHORA)[0]
+    latido.write_text(str(AHORA - 15))
+    assert "en marcha" in pc.texto_vigilante(latido, AHORA)[0]
+    assert "parado" in pc.texto_vigilante(latido, AHORA + 300)[0]

@@ -13,6 +13,7 @@ from pathlib import Path
 RUTA = Path(os.environ.get("APPDATA", ".")) / "MetaQuotes" / "Terminal" / "Common" / "Files" / "rf_bot_panel.txt"
 PLANTILLA_PROBABILIDADES = "P_long=%.3f P_short=%.3f"  # el mensaje de trading_bot.evaluar_entrada
 INTERVALO_LATIDO_S = 5  # el indicador avisa si pasan 20 s sin novedades
+SIN_LIMITE = "--:--"  # hora de fin de una sesión sin límite (el indicador la muestra tal cual)
 
 
 class PanelMT5(logging.Handler):
@@ -23,7 +24,8 @@ class PanelMT5(logging.Handler):
         self.ruta = ruta
         self.umbral_long = self.umbral_short = None
         self.datos = {"estado": "en_marcha", "simbolo": simbolo, "cuenta": cuenta, "magic": magic,
-                      "fin": datetime.fromtimestamp(fin).strftime("%H:%M"), "umbral_long": "", "umbral_short": ""}
+                      "fin": SIN_LIMITE if math.isinf(fin) else datetime.fromtimestamp(fin).strftime("%H:%M"),
+                      "umbral_long": "", "umbral_short": ""}
         self._ultimo_latido = -math.inf
 
     def fijar_umbrales(self, umbral_long, umbral_short) -> None:

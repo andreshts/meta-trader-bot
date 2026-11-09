@@ -3,7 +3,8 @@
 Sin configuración es la demo de siempre. Una cuenta real exige EXNESS_CUENTA_REAL=1 y, salvo que se desactive a
 propósito, un modelo con ventaja significativa.
 
-Uso: python demo_exness_bot.py --horas 5 [--simbolo XAUUSDm] [--umbral 0.30]   (crear logs/PAUSA bloquea nuevas entradas)
+Uso: python demo_exness_bot.py [--horas 5] [--simbolo XAUUSDm] [--umbral 0.30]   (crear logs/PAUSA bloquea nuevas entradas)
+Sin --horas corre hasta que se detenga. vigilante.py relanza los bots que la ventana dejó en marcha si se caen.
 La ventana de panel_control.py lanza un proceso de este script por cada activo y arma estos argumentos.
 El estado se ve dentro de MT5 con el indicador mql5/RF_Bot_Panel.mq5.
 --umbral sustituye, solo en esa ejecución, los umbrales del modelo: da más operaciones, no más ventaja.
@@ -127,7 +128,12 @@ def resultado_del_dia() -> tuple:
 
 
 def ciclo_con_limite(fin: float, panel: PanelMT5, detener=None):
-    def ciclo(bundle: dict, estado: dict) -> None:
+    """El ciclo del bot con fin de sesión (`fin` infinito = sin límite), orden de detener y latido.
+
+    `ciclo.al_esperar` hace lo mismo mientras el bot espera a que vuelva la conexión, para que siga
+    respondiendo a la ventana y al vigilante.
+    """
+    def parar_si_toca() -> None:
         if time.time() >= fin:
             trading_bot.log.info("Fin de la sesión programada")
             raise SystemExit(0)  # no es una Exception: sale del bucle y cierra la conexión con MT5
@@ -135,14 +141,23 @@ def ciclo_con_limite(fin: float, panel: PanelMT5, detener=None):
             trading_bot.log.info("Detenido desde la ventana de configuración")
             detener.unlink(missing_ok=True)
             raise SystemExit(0)
+
+    def ciclo(bundle: dict, estado: dict) -> None:
+        parar_si_toca()
         _ciclo(bundle, estado)
         panel.latido()
+
+    def al_esperar() -> None:
+        parar_si_toca()
+        panel.latido()
+
+    ciclo.al_esperar = al_esperar
     return ciclo
 
 
 def leer_argumentos() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--horas", type=float, required=True)
+    parser.add_argument("--horas", type=numero_positivo, help="duración de la sesión; sin él, hasta que se detenga")
     parser.add_argument("--simbolo", choices=ACTIVOS, default=EURUSD.simbolo)
     parser.add_argument("--umbral", type=umbral_valido, help="umbral de long y short solo para esta ejecución, ej. 0.30")
     parser.add_argument("--umbral-long", type=umbral_o_apagado, default=DEL_MODELO, help="umbral de compra, u off")
@@ -189,7 +204,7 @@ def configurar_activo(activo: Activo, args: argparse.Namespace) -> None:
 def main() -> None:
     args = leer_argumentos()
     activo = ACTIVOS[args.simbolo]
-    fin = time.time() + args.horas * 3600
+    fin = time.time() + args.horas * 3600 if args.horas else math.inf
     panel = PanelMT5(activo.simbolo, CUENTA.login, activo.magic, fin, activo.panel)
 
     def cargar_modelo_y_publicar() -> dict:
@@ -208,6 +223,7 @@ def main() -> None:
     trading_bot.build_features = features_en_hora_del_modelo
     trading_bot.resultado_del_dia = resultado_del_dia
     trading_bot.ciclo = ciclo_con_limite(fin, panel, activo.detener)
+    trading_bot.al_esperar = trading_bot.ciclo.al_esperar
     if activo.cierra_a_diario:
         trading_bot.es_salto_de_fin_de_semana = salto_admitido
     trading_bot.log.addHandler(panel)

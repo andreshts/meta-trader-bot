@@ -800,3 +800,52 @@ def test_bloqueo_desactivable_para_probar_en_demo(monkeypatch):
     _bundle_guardado(TODAS(_wf(-1.0)), {"trades": 0})
     monkeypatch.setattr(config, "EXIGIR_VENTAJA_SIGNIFICATIVA", False)
     assert tb.cargar_modelo() is not None
+
+
+# ---------------- espera de la conexión ----------------
+def _reconecta_a_la(fake, monkeypatch, vuelta: int):
+    """mt5_utils.conectar falla hasta la vuelta indicada."""
+    intentos = []
+
+    def conectar():
+        intentos.append(1)
+        return fake.reconectar() if len(intentos) >= vuelta else False
+    monkeypatch.setattr(mt5_utils, "conectar", conectar)
+    return intentos
+
+
+def test_un_corte_breve_no_es_un_aviso(mt5, monkeypatch, caplog):
+    mt5.conectado = False
+    with caplog.at_level("INFO", logger="trading_bot"):
+        tb.esperar_conexion(mt5.cuenta.login)
+    assert [r.levelname for r in caplog.records] == ["INFO", "INFO"]
+    assert "Corte breve" in caplog.records[-1].getMessage()
+
+
+def test_un_corte_largo_pasa_a_aviso_y_anuncia_la_recuperacion(mt5, monkeypatch, caplog):
+    reloj = iter(range(0, 10_000, 40))  # cada consulta del reloj avanza 40 s
+    monkeypatch.setattr(tb.time, "monotonic", lambda: next(reloj))
+    mt5.conectado = False
+    _reconecta_a_la(mt5, monkeypatch, 3)
+    with caplog.at_level("INFO", logger="trading_bot"):
+        tb.esperar_conexion(mt5.cuenta.login)
+    niveles = [r.levelname for r in caplog.records]
+    assert niveles[0] == "INFO" and "WARNING" in niveles
+    assert "Conexión recuperada tras" in caplog.records[-1].getMessage()
+
+
+def test_mientras_no_hay_conexion_se_llama_a_al_esperar_y_puede_detener_el_bot(mt5, monkeypatch):
+    mt5.conectado = False
+    intentos = _reconecta_a_la(mt5, monkeypatch, 3)
+    llamadas = []
+    monkeypatch.setattr(tb, "al_esperar", lambda: llamadas.append(1))
+    tb.esperar_conexion(mt5.cuenta.login)
+    assert len(llamadas) == len(intentos) == 3
+
+    def detener():
+        raise SystemExit(0)
+    mt5.conectado = False
+    _reconecta_a_la(mt5, monkeypatch, 99)
+    monkeypatch.setattr(tb, "al_esperar", detener)
+    with pytest.raises(SystemExit):
+        tb.esperar_conexion(mt5.cuenta.login)

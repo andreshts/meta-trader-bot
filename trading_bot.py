@@ -128,21 +128,35 @@ def verificar_cuenta(login_esperado=None) -> int:
     return cuenta.login
 
 
+al_esperar = None  # si se define, esperar_conexion la llama en cada reintento (el lanzador: latido, Detener, fin de sesión)
+
+
 def esperar_conexion(login) -> None:
-    """Espera a que la terminal esté conectada; si hubo que reconectar, vuelve a verificar la cuenta."""
-    reconectado = False
+    """Espera a que la terminal esté conectada; si hubo que reconectar, vuelve a verificar la cuenta.
+
+    Un corte más corto que AVISO_SIN_CONEXION_S solo queda en el log como información; a partir de ahí es un aviso.
+    """
+    inicio = None
     while True:
         terminal = mt5.terminal_info()
         if terminal is not None and terminal.connected:
-            if reconectado:
+            if inicio is not None:
                 verificar_cuenta(login)
-                log.info("Conexión recuperada; cuenta %s verificada", login)
+                duracion = time.monotonic() - inicio
+                if duracion >= config.AVISO_SIN_CONEXION_S:
+                    log.info("Conexión recuperada tras %.0f s; cuenta %s verificada", duracion, login)
+                else:
+                    log.info("Corte breve de conexión (%.0f s); cuenta %s verificada", duracion, login)
             return
-        reconectado = True
-        log.warning("Sin conexión con MT5; reintento en %ss", config.REINTENTO_CONEXION_S)
+        if inicio is None:
+            inicio = time.monotonic()
+        nivel = logging.WARNING if time.monotonic() - inicio >= config.AVISO_SIN_CONEXION_S else logging.INFO
+        log.log(nivel, "Sin conexión con MT5; reintento en %ss", config.REINTENTO_CONEXION_S)
         if terminal is None:
             mt5.shutdown()
             mt5_utils.conectar()
+        if al_esperar is not None:
+            al_esperar()
         time.sleep(config.REINTENTO_CONEXION_S)
 
 
