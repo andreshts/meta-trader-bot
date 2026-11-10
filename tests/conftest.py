@@ -91,6 +91,8 @@ def config_aislado(tmp_path, monkeypatch):
     """Ningún test escribe en logs/ ni en models/ del proyecto, ni espera de verdad. No usar
     monkeypatch.undo() en los tests: desharía también este aislamiento (usar monkeypatch.context())."""
     """Ningún test escribe en logs/ ni en models/ del proyecto, ni espera de verdad."""
+    import calendario
+    monkeypatch.setattr(calendario, "RUTA", tmp_path / "rf_calendario.csv")  # el de la terminal no cuenta en los tests
     for nombre, archivo in {
         "LOG_PATH": "trading_bot.log",
         "OPERACIONES_PATH": "operaciones.csv",

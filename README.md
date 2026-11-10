@@ -16,6 +16,8 @@ Bot de trading algorítmico automatizado que combina Machine Learning (**Random 
 ├── cuenta.py                 # Cuenta de Exness (demo o real) para el lanzador por activo, la ventana y train_exness
 ├── riesgo_cuenta.py          # Máximo de equity y turno de apertura compartidos por los bots de una cuenta
 ├── alertas.py                # Avisos por Telegram de ejecuciones, límites, errores y paradas
+├── experimentos.py           # Banco de experimentos: variantes del modelo en los 5 activos, con registro
+├── calendario.py             # Calendario económico exportado por mql5/RF_Calendario.mq5: filtro de noticias
 ├── medicion.py               # Compara la ejecución real (operaciones.csv) con los supuestos del backtest
 ├── vigilante.py              # Relanza los bots que se caen y avisa (iniciar_vigilante.bat)
 ├── tendencia.py              # Backtest de seguimiento de tendencia por reglas (Donchian) en varios mercados

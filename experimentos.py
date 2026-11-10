@@ -23,6 +23,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+import calendario
 import config
 import train_model as tm
 from activos import ACTIVOS, hora_modelo
@@ -90,6 +91,17 @@ def otros_activos(df: pd.DataFrame, contexto: dict) -> pd.DataFrame:
     return df
 
 
+def noticias(df: pd.DataFrame, contexto: dict) -> pd.DataFrame:
+    """Cercanía a las noticias de alto impacto de las monedas del activo, en el instante de la entrada (el cierre de
+    la vela t). La hora de una noticia programada se conoce de antemano, así que mirar la próxima no es una fuga."""
+    entrada = df["time_utc"].to_numpy(dtype=np.int64) + config.TIMEFRAME_SEGUNDOS
+    hasta, desde = calendario.minutos_a_la_noticia(contexto["noticias"], entrada)
+    df["noticia_hasta"], df["noticia_desde"] = hasta / 1440, desde / 1440
+    df["noticia_cerca"] = calendario.cerca_de_noticia(contexto["noticias"], entrada, calendario.MINUTOS_ANTES * 60,
+                                                      calendario.MINUTOS_DESPUES * 60).astype(float)
+    return df
+
+
 def _sin_cambios(df: pd.DataFrame, contexto: dict) -> pd.DataFrame:
     return df
 
@@ -116,6 +128,10 @@ VARIANTES = {
     "regimen_filtro": Variante("3.3b Sin entradas en rango (ADX <= 25)", regimen, (), lambda datos: datos["adx"] > ADX_TENDENCIA),
     "otros_activos": Variante("5.4 Rentabilidad a 1 h y 4 h de los otros cuatro activos", otros_activos,
                               lambda contexto: [f"rel_{s}_{h}" for s in contexto["otros"] for h in ("1h", "4h")]),
+    "noticias_filtro": Variante("1.4 Sin entradas de 15 min antes a 15 min después de noticias de alto impacto", noticias, (),
+                                lambda datos: datos["noticia_cerca"] == 0),
+    "noticias_feature": Variante("5.4 Tiempo hasta la próxima noticia de alto impacto y desde la última", noticias,
+                                 ("noticia_hasta", "noticia_desde")),
     "deslizante": Variante("4.3 Entrenamiento con ventana deslizante de unos 12 meses", segmentos_train=VENTANA_DESLIZANTE_SEGMENTOS),
 }
 
@@ -284,11 +300,24 @@ def main() -> None:
 
     ctypes.windll.kernel32.SetPriorityClass(ctypes.wintypes.HANDLE(-1), 0x4000)  # por debajo de lo normal: los bots van primero
     paquetes = cargar(ACTIVOS)  # todos: una variante puede mirar los demás activos
+    try:
+        eventos = calendario.leer(calendario.RUTA)[1]
+    except (OSError, ValueError):
+        eventos = None  # sin el servicio RF_Calendario, las variantes de noticias no se pueden evaluar
     hechos = set() if args.repetir else {(f["variante"], f["simbolo"], int(f["semilla"])) for f in leer_registro()}
     for nombre in args.variantes or VARIANTES:
         for simbolo in args.simbolos:
             semillas = [s for s in SEMILLAS if (nombre, simbolo, s) not in hechos]
             contexto = {"otros": {s: p["velas"] for s, p in paquetes.items() if s != simbolo}}
+            if VARIANTES[nombre].extra is noticias:
+                if eventos is None:
+                    print(f"{nombre}: falta el calendario ({calendario.RUTA}); inicia el servicio RF_Calendario en MT5", flush=True)
+                    break
+                contexto["noticias"] = calendario.horas(eventos, calendario.MONEDAS[simbolo])
+                inicio = int(paquetes[simbolo]["velas"]["time"].iloc[0])
+                if len(contexto["noticias"]) == 0 or contexto["noticias"][0] > inicio + 30 * 86400:
+                    print(f"{nombre}: el calendario no cubre el histórico de {simbolo}; sube DiasDeHistoria en el servicio", flush=True)
+                    continue
             for fila in evaluar(nombre, simbolo, paquetes[simbolo], contexto, semillas):
                 apuntar(fila)
                 print(f"{nombre:<17}{simbolo:<9}semilla {fila['semilla']:>2}: {fila['trades']} trades, "

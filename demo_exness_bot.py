@@ -22,6 +22,7 @@ import MetaTrader5 as mt5
 import numpy as np
 
 import alertas
+import calendario
 import config
 import trading_bot
 from activos import ACTIVOS, EURUSD, Activo, en_franja, es_cierre_diario, hora_modelo, segundos_del_dia
@@ -103,6 +104,27 @@ def evaluar_fuera_de(franja: tuple):
             trading_bot.log.info("Vela dentro de la franja sin entradas (%s a %s, hora de los modelos); no se evalúa", *franja)
             return
         _evaluar_entrada(bundle, info, bar_time, estado)
+    return evaluar_entrada
+
+
+def evaluar_sin_noticias(evaluar, noticias):
+    """`evaluar`, salvo en las velas que abren cerca de una noticia de alto impacto de las monedas del activo.
+
+    `noticias` es un calendario.Calendario. Si no se puede leer o está caducado, se avisa y se evalúa igual: que el
+    servicio de la terminal se pare no debe dejar al bot sin operar.
+    """
+    def evaluar_entrada(bundle: dict, info, bar_time: int, estado: dict) -> None:
+        try:
+            noticia = noticias.noticia_cercana(bar_time)  # la hora del servidor de Exness es UTC, como el calendario
+        except (OSError, ValueError, LookupError) as e:
+            trading_bot.log.warning("Calendario económico no disponible (%s); no se filtran las noticias", e)
+            noticia = None
+        if noticia is not None:
+            hora, moneda, nombre = noticia
+            trading_bot.log.info("Noticia de alto impacto a las %s UTC (%s: %s); no se evalúa esta vela",
+                                 datetime.fromtimestamp(hora, timezone.utc).strftime("%H:%M"), moneda, nombre)
+            return
+        evaluar(bundle, info, bar_time, estado)
     return evaluar_entrada
 
 
@@ -199,6 +221,8 @@ def leer_argumentos() -> argparse.Namespace:
     parser.add_argument("--max-spread", type=numero_positivo, help="spread máximo para entrar, en puntos")
     parser.add_argument("--sin-entradas", type=franja_o_apagada, default=DEL_MODELO,
                         help="franja sin entradas HH:MM-HH:MM, en hora de los modelos (cierre de Nueva York = 00:00), u off")
+    parser.add_argument("--con-noticias", action="store_true",
+                        help="no aplica el filtro de noticias de alto impacto (calendario económico)")
     parser.add_argument("--perdida-diaria", type=porcentaje, help="pérdida máxima del día, en %% del balance")
     parser.add_argument("--drawdown", type=porcentaje, help="caída máxima desde el máximo de equity, en %%")
     parser.add_argument("--cerrar-al-limite", action="store_true",
@@ -265,6 +289,9 @@ def main() -> None:
     franja = activo.sin_entradas if args.sin_entradas is DEL_MODELO else args.sin_entradas
     if franja is not None:
         trading_bot.evaluar_entrada = evaluar_fuera_de(franja)
+    if not args.con_noticias and calendario.RUTA.exists():  # sin el servicio RF_Calendario nunca hubo archivo: no hay filtro
+        noticias = calendario.Calendario(calendario.MONEDAS.get(activo.simbolo, ("USD",)), calendario.RUTA)
+        trading_bot.evaluar_entrada = evaluar_sin_noticias(trading_bot.evaluar_entrada, noticias)
     trading_bot.log.addHandler(panel)
     avisos = alertas.crear(f"{activo.simbolo} · {CUENTA.tipo} {CUENTA.login}")  # None sin Telegram configurado
     if avisos is not None:

@@ -13,7 +13,7 @@ Una mejora del modelo (feature, régimen, filtro, re-entrenamiento) solo cuenta 
 1. **Fijar la variante antes de mirar resultados:** qué se añade, con qué parámetros y qué se espera. No se ajustan parámetros viendo el test.
 2. **Walk-forward desde 2010** (`train_model.py`: 5 ventanas, purga por el final de cada etiqueta, 3 semillas), comparando contra la línea base, **con los mismos datos**.
 3. **Criterio:** que suba el ROC-AUC de forma estable entre ventanas **y** que la esperanza agregada mejore con las 3 semillas. Solo se considera ventaja real con `t >= 2` en todas las semillas, y además en el holdout (≥ 30 trades).
-4. **Contar las pruebas.** Cada variante evaluada sobre los mismos datos aumenta la probabilidad de un falso positivo. Llevamos **unas 38 variantes**. Con tantas, un `t` cercano a 2 aislado no significa nada (ver [Entrenamiento.md](Entrenamiento.md)).
+4. **Contar las pruebas.** Cada variante evaluada sobre los mismos datos aumenta la probabilidad de un falso positivo. Llevamos **unas 46 variantes** (38 en EURUSD desde 2010 y 8 en el banco de experimentos sobre los 5 activos de Exness). Con tantas, un `t` cercano a 2 aislado no significa nada (ver [Entrenamiento.md](Entrenamiento.md)).
 5. **No tocar el holdout** (desde `HOLDOUT_DESDE = 2026-10-30`) para elegir variantes. Solo decide el despliegue final.
 6. **Pruebas automáticas** (`python -m pytest tests`) para el código nuevo, en particular contra fugas de datos del futuro, y documentar el resultado en [Entrenamiento.md](Entrenamiento.md).
 
@@ -55,7 +55,8 @@ No depende de encontrar ventaja: protege la cuenta en cualquier caso.
   - Hoy está en `None` (0.01 fijo).
   - Hecho cuando: se elige un `RIESGO_PCT` (por ejemplo 0.25%), se activa en la Demo y se comprueba en `operaciones.csv` que el riesgo en dinero es constante entre operaciones.
   - Resultado:
-- [ ] **1.4 Filtro de calendario económico**: sin nuevas entradas de 15 minutos antes a 15 minutos después de noticias de alto impacto (NFP, FOMC, IPC, BCE).
+- [x] **1.4 Filtro de calendario económico** (2026-11-10: servicio [mql5/RF_Calendario.mq5](mql5/RF_Calendario.mq5), [calendario.py](calendario.py) y filtro en el lanzador, activo por defecto)
+  - Resultado: el servicio entrega 17.398 eventos de USD y EUR desde 2021-05 (3.567 de alto impacto, unos 620 al año), con las horas en UTC comprobadas con el NFP. En el backtest ([experimentos.py](experimentos.py), 5 activos, 3 semillas) **no da ventaja**: como filtro (`noticias_filtro`), `t` medio por activo −1.54 / +0.32 / +0.16 / −0.75 / −0.61 (mejora a la base en el S&P 500 y el DAX); como feature (`noticias_feature`, tiempo hasta la próxima noticia y desde la última), −0.14 / −0.48 / −1.26 / −0.62 / −0.47 (mejora solo en el DAX). El ROC-AUC no cambia. El filtro se mantiene como protección de la ejecución: el backtest usa el spread de la vela y no modela el deslizamiento en una noticia.: sin nuevas entradas de 15 minutos antes a 15 minutos después de noticias de alto impacto (NFP, FOMC, IPC, BCE).
   - La API de Python de MT5 **no** da acceso al calendario: está solo en MQL5 (`CalendarValueHistory`). Opciones: un pequeño Expert Advisor en MQL5 que exporte los eventos a un CSV que lea el bot, o una fuente externa.
   - Hecho cuando: el bot lee los eventos, los registra en el log, bloquea entradas en la ventana y tiene pruebas automáticas. Para medir su efecto en el backtest hace falta el histórico de eventos; si no lo hay, se valida solo en Demo.
   - Resultado:
@@ -80,13 +81,10 @@ Cada una se evalúa con el protocolo, por separado y luego en combinación con l
 
 ### Pendientes
 
-- [ ] **2.1 Banderas de sesión**: Asia, Londres, Nueva York y el solape Londres–NY, en hora del servidor (GMT+2/+3), con atención a los cambios de horario de verano de Europa y EE. UU.
-  - Parte de esta información ya la capturan `hora_sin` y `hora_cos`. Hay que comprobar si aportan algo más.
-  - Hecho cuando: pasa el protocolo, o se marca ❌.
-  - Resultado:
-- [ ] **2.2 Squeeze**: anchura de las Bandas de Bollinger(20, 2) entre la anchura del Canal de Keltner(20, 1.5×ATR), y una bandera de squeeze activo.
-  - Hecho cuando: pasa el protocolo, o se marca ❌.
-  - Resultado:
+- ❌ **2.1 Banderas de sesión**: Asia, Londres, Nueva York y el solape Londres–NY, por la hora local de cada plaza (con sus cambios de horario).
+  - Resultado: sin ventaja. Evaluada el 2026-11-10 con el banco de experimentos ([experimentos.py](experimentos.py)) en los 5 activos de Exness (unas 100.000 velas M15 cada uno, walk-forward hasta 2025-12-31, 3 semillas). `t` medio por activo (EUR/USD, oro, S&P 500, Nasdaq, DAX): −0.86 / +0.07 / −0.78 / +0.28 / −2.35; mejora a la base solo en el Nasdaq y el ROC-AUC no cambia. `hora_sin` y `hora_cos` ya recogen esa información.
+- ❌ **2.2 Squeeze**: anchura de las Bandas de Bollinger(20, 2) entre la anchura del Canal de Keltner(20, 1.5×ATR), y una bandera de squeeze activo.
+  - Resultado: sin ventaja. Evaluada el 2026-11-10 con el banco de experimentos ([experimentos.py](experimentos.py)) en los 5 activos de Exness (unas 100.000 velas M15 cada uno, walk-forward hasta 2025-12-31, 3 semillas). `t` medio por activo: −0.30 / +0.50 / −0.12 / −0.41 / −1.50; mejora algo a la base en 3 de 5, pero ninguna semilla de ningún activo llega a `t` = 1 y el ROC-AUC no cambia.
 
 ---
 
@@ -102,8 +100,9 @@ Depende de 2.3 (ADX). Clasifica el mercado en tendencia alcista, tendencia bajis
   - Hecho cuando: hay pruebas contra fugas y estados estables entre ventanas.
   - Resultado:
 - [ ] **3.3 Usos del régimen**, cada uno evaluado con el protocolo:
-  - [ ] a) como feature más del modelo;
-  - [ ] b) como filtro: sin entradas en rango;
+  - ❌ a) como feature más del modelo (régimen por reglas con ADX > 25 y el DI dominante, más el ADX): `t` medio por activo −2.12 / +0.11 / −1.40 / +0.11 / −2.45; mejora a la base solo en el Nasdaq.
+  - ❌ b) como filtro, sin entradas en rango (ADX ≤ 25): −2.52 / +0.33 / −0.89 / −0.54 / −0.40; mejora solo en el DAX, donde casi deja de operar (74 trades).
+  - Las dos, evaluadas el 2026-11-10 con [experimentos.py](experimentos.py) en los 5 activos de Exness.
   - [ ] c) con SL/TP distintos por régimen. Multiplica las variantes probadas, así que hay que contarlas en el protocolo.
   - Resultado:
 
@@ -116,7 +115,7 @@ Depende de 2.3 (ADX). Clasifica el mercado en tendencia alcista, tendencia bajis
 - [x] **4.2 Walk-forward anclado** (train creciente) para evaluar.
 - [ ] **4.3 Ventana deslizante frente a anclada**: entrenar solo con los últimos X meses (por ejemplo 12) y comparar con la anclada usando el protocolo.
   - 3 meses de M15 son unas 6.000 filas, pocas para un Random Forest con esta tasa de aciertos. Conviene probar 6, 12 y 24 meses, fijados de antemano.
-  - Resultado:
+  - Resultado (2026-11-10, ❌ con 12 meses): en los 5 activos de Exness, `t` medio −0.76 / +0.67 / −1.60 / −1.17 / −0.72; mejora a la base en el oro (+0.07) y el DAX. Con unas 100.000 velas por activo, 6 meses dejan muy pocas filas y 24 meses son casi la ventana anclada, así que no se evaluaron.
 - [ ] **4.4 Robustez por desplazamiento de ventanas**: repetir el walk-forward con los cortes desplazados (por ejemplo, 3 desplazamientos de un mes) además de las 3 semillas, y exigir que todos pasen.
   - Motivo: desplazar la ventana 92 velas movió el `t` más de 3 puntos.
   - Hecho cuando: está integrado en `train_model.py` y en el bloqueo del bot, con pruebas.
@@ -141,7 +140,7 @@ La información que no está en OHLC es la más prometedora, porque la direcció
   - Resultado:
 - [ ] **5.4 Datos externos**: calendario económico (también de la Fase 1.4), activos relacionados (índice del dólar, diferenciales de tipos, oro) y sentimiento.
   - Cada fuente nueva necesita su propio histórico alineado en hora del servidor.
-  - Resultado:
+  - Resultado parcial (2026-11-10, ❌ activos relacionados): rentabilidad a 1 h y 4 h de los otros cuatro activos de Exness como features. `t` medio por activo −2.87 / −0.08 / +0.08 / −0.69 / −0.89; mejora a la base en el S&P 500 y el DAX, sin acercarse a `t` = 2, y el ROC-AUC no cambia. El calendario económico se evaluó en 1.4 (❌ como feature). Queda por evaluar el sentimiento.
 
 ---
 
@@ -216,4 +215,5 @@ La dirección de EURUSD M15 no se puede predecir con velas (Fases 2 y 5), y en p
 | 2026-10-31 | Plan creado a partir de la lista de propuestas; marcado lo ya hecho y lo ya descartado. |
 | 2026-10-31 | Evaluadas 2.3 (`ADX(14)`, `+DI`, `-DI`), 2.4 (`Multi-timeframe real` H1/H4 cerrado) y su combinación en el walk-forward desde 2010: marcadas ❌ como features del modelo; `adx_wilder` y `mtf_cerrado` quedan en `features.py` con pruebas anti-fuga (111 tests). |
 | 2026-11-02 | Añadida la Fase 6 (seguimiento de tendencia por reglas), con reglas y criterio fijados antes de ver resultados. Evaluada 6.1 (Donchian 55/20 en D1, 6 mercados, y 5 comprobaciones): ❌ sin ventaja. `tendencia.py` con 23 pruebas nuevas (134 tests). |
+| 2026-11-10 | Banco de experimentos ([experimentos.py](experimentos.py), registro en `experimentos/registro.csv`): evalúa cada variante en los 5 activos de Exness con el walk-forward de `train_model.py`, 3 semillas y holdout desde 2026-01-01 sin tocar. Evaluadas 2.1, 2.2, 3.3a, 3.3b, 4.3 (12 meses) y 5.4 (activos relacionados): ❌ todas. La base da `t` medio −0.08 / +0.60 / −0.48 / −0.47 / −1.91, con mucha dispersión entre semillas (EUR/USD: +2.23 / −1.34 / −1.12). |
 | 2026-11-02 | Añadida y evaluada 6.2 (cartera diversificada por sectores; enmienda de los índices con ETFs por falta de datos): ❌ sin ventaja. `tendencia.py --diversificada`, con filtro de calidad, pesos por sector y aviso de spreads erróneos (138 tests). |

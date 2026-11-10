@@ -335,3 +335,15 @@ def test_una_franja_mal_escrita_no_arranca(lanzar, valor):
 def test_el_eurusd_usa_como_los_demas_un_modelo_entrenado_con_velas_de_exness():
     assert EURUSD.simbolo_modelo == "EURUSDm" and EURUSD.modelo.parent == ACTIVOS["XAUUSDm"].modelo.parent
     assert EURUSD.umbrales is None  # sus umbrales iniciales salen del entrenamiento
+
+
+def test_el_filtro_de_noticias_solo_se_aplica_si_el_servicio_exporto_el_calendario(lanzar):
+    import calendario
+    tb = lanzador.trading_bot
+    lanzar("--sin-entradas", "off")
+    original = tb.evaluar_entrada  # sin archivo del calendario no hay filtro
+    calendario.RUTA.write_text("# exportado=0\ntime_utc\tmoneda\timportancia\tevento_id\tnombre\n", encoding="utf-8")
+    lanzar("--sin-entradas", "off", "--con-noticias")
+    assert tb.evaluar_entrada is original
+    lanzar("--sin-entradas", "off")
+    assert tb.evaluar_entrada is not original

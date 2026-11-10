@@ -35,7 +35,7 @@ MAX_CLAVES = 500
 SIEMPRE = (" ejecutada", "confirmada al reconciliar", "Deal de %s", "Bot iniciado", "Entrada pendiente (orden %s) resuelta",
            "Fin de la sesión programada", "Detenido desde la ventana", "Bot detenido por el usuario", "Conexión recuperada")
 BLOQUEOS = ("Sin nuevas entradas: %s", "Sin entrada: %s")
-IGNORADOS = ("Spread de %s puntos", "EXIGIR_VENTAJA_SIGNIFICATIVA = False", "Umbral manual")
+IGNORADOS = ("Spread de %s puntos", "Noticia de alto impacto", "EXIGIR_VENTAJA_SIGNIFICATIVA = False", "Umbral manual")
 ICONOS = {logging.INFO: "ℹ️", logging.WARNING: "⚠️", logging.ERROR: "❌", logging.CRITICAL: "❌"}
 NUMEROS = re.compile(r"\d[\d.,:]*")
 

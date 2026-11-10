@@ -229,6 +229,20 @@ No se avisan las probabilidades de cada vela ni el filtro de spread. Un corte de
 * **Comisión según el tipo de cuenta** (`python train_exness.py [SIMBOLO ...] --comision 7`): comisión de ida y vuelta por lote, en la moneda de la cuenta, que el backtest descuenta de cada operación. En una cuenta Standard (símbolos con sufijo `m`, la de la demo) es 0; en una Raw Spread o Zero, la que cobre Exness por ese instrumento. Queda guardada en `costes` dentro del modelo.
 * **EUR/USD con velas de Exness:** `train_exness.py` entrena también `EURUSDm` y el lanzador usa `models/exness/EURUSDm.pkl`. El modelo de `models/random_forest_mt5.pkl` (entrenado con MetaQuotes-Demo, cuyo volumen de ticks y spread no son comparables) queda solo para `trading_bot.py` a secas.
 
+### Filtro de noticias (calendario económico)
+
+La API de Python de MT5 no da acceso al calendario económico, así que lo exporta un servicio de la terminal, [mql5/RF_Calendario.mq5](mql5/RF_Calendario.mq5): cada hora escribe en `Common\Files\rf_calendario.csv` los eventos de importancia media y alta de las monedas indicadas (por defecto USD y EUR), con unos 5 años de historia y 14 días hacia delante, y las horas en UTC. Solo lee el calendario: no opera.
+
+Puesta en marcha, una vez:
+
+1. En MT5: Archivo → Abrir carpeta de datos, y copiar `RF_Calendario.mq5` a `MQL5\Services`.
+2. Abrirlo en MetaEditor (F4) y compilarlo (F7).
+3. En el Navegador de la terminal: Servicios → clic derecho → Añadir servicio → `RF_Calendario` → Aceptar. Queda en marcha y arranca solo con la terminal.
+
+Con ese archivo presente, cada bot deja de evaluar entradas en las velas que abren desde 15 minutos antes hasta 15 minutos después de una noticia de alto impacto de las monedas de su activo (`calendario.MONEDAS`: USD para el oro y los índices de EE. UU., EUR y USD para el EUR/USD y el DAX). Las posiciones abiertas se gestionan igual. `--con-noticias` lo desactiva. Si el archivo no existe, no hay filtro; si deja de actualizarse más de 2 días o no se puede leer, el bot avisa (también por Telegram) y sigue evaluando sin filtro.
+
+El mismo archivo alimenta dos variantes del banco de experimentos: `noticias_filtro` y `noticias_feature`.
+
 ### Funcionamiento continuo y vigilante
 
 * **Sesión sin límite:** sin `--horas` (en la ventana, con "Duración" vacía) el bot corre hasta que se detenga, así el time stop no depende de relanzarlo. El panel de MT5 muestra `--:--` como hora de fin.
