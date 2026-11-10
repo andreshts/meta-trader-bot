@@ -272,3 +272,22 @@ def test_el_resumen_cuenta_las_operaciones_de_las_ultimas_24_horas(tmp_path):
     lineas = vg.texto_resumen(activos, {"DE30m": {}, "XAGUSDm": {}}, AHORA).splitlines()
     assert lineas[1:] == ["XAUUSDm: detenido · 1 entrada, 1 cierre, -5.02", "DE30m: en marcha · sin operaciones",
                           "XAGUSDm: sin responder · sin operaciones", "Resultado neto: -5.02"]
+
+
+def test_el_resumen_lleva_el_balance_y_la_equity_mas_recientes(tmp_path):
+    oro, dax = crear_activo(tmp_path), crear_activo(tmp_path, "DE30m")
+    activos, deseados = {a.simbolo: a for a in (oro, dax)}, {"XAUUSDm": {}, "DE30m": {}}
+
+    def publicar_cuenta(activo, hace_s, balance, equity):
+        activo.panel.write_text(f"estado=en_marcha\nactualizado={int(AHORA)}\nbalance={balance}\nequity={equity}\nmoneda=USD\n"
+                                f"cuenta_leida={int(AHORA - hace_s)}\n", encoding="utf-8")
+
+    publicar(oro, AHORA)
+    publicar(dax, AHORA)
+    assert vg.texto_resumen(activos, deseados, AHORA).splitlines()[-1] == "Resultado neto: +0.00"  # nadie publicó la cuenta
+    publicar_cuenta(oro, 120, "10000.00", "10010.00")
+    publicar_cuenta(dax, 5, "9994.98", "9990.00")
+    assert vg.texto_resumen(activos, deseados, AHORA).splitlines()[-1] == "Balance 9994.98 · equity 9990.00 (flotante -4.98) USD"
+    publicar_cuenta(oro, vg.CUENTA_RECIENTE_S + 200, "1", "1")
+    publicar_cuenta(dax, vg.CUENTA_RECIENTE_S + 100, "2", "2")
+    assert "Balance" not in vg.texto_resumen(activos, deseados, AHORA)  # demasiado antiguos para darlos por buenos

@@ -50,10 +50,21 @@ class PanelMT5(logging.Handler):
         except Exception:
             self.handleError(record)
 
-    def latido(self) -> None:
-        """Lo llama el bucle del bot en cada vuelta. Sin latidos, el panel avisa de que el bot no responde."""
-        if time.monotonic() - self._ultimo_latido >= INTERVALO_LATIDO_S:
-            self._publicar()
+    def latido(self, cuenta=None) -> None:
+        """Lo llama el bucle del bot en cada vuelta. Sin latidos, el panel avisa de que el bot no responde.
+
+        `cuenta()` devuelve el balance, la equity y la moneda de la cuenta (o None si no se pueden leer); solo se
+        llama cuando toca publicar, y es lo que el vigilante pone en su resumen diario.
+        """
+        if time.monotonic() - self._ultimo_latido < INTERVALO_LATIDO_S:
+            return
+        try:
+            datos = cuenta() if cuenta is not None else None
+            if datos:
+                self.datos.update(datos, cuenta_leida=int(time.time()))
+        except Exception:
+            pass  # el latido sale igual, con los últimos datos de la cuenta que se leyeron
+        self._publicar()
 
     def detener(self) -> None:
         self.datos["estado"] = "detenido"

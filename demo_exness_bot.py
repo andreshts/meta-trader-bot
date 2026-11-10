@@ -150,6 +150,14 @@ def resultado_del_dia() -> tuple:
     return realizado, flotante
 
 
+def datos_de_la_cuenta() -> dict | None:
+    """Balance, equity y moneda para el panel; None si la terminal no los entrega ahora."""
+    cuenta = mt5.account_info()
+    if cuenta is None:
+        return None
+    return {"balance": f"{cuenta.balance:.2f}", "equity": f"{cuenta.equity:.2f}", "moneda": cuenta.currency}
+
+
 def ciclo_con_limite(fin: float, panel: PanelMT5, detener=None):
     """El ciclo del bot con fin de sesión (`fin` infinito = sin límite), orden de detener y latido.
 
@@ -168,7 +176,7 @@ def ciclo_con_limite(fin: float, panel: PanelMT5, detener=None):
     def ciclo(bundle: dict, estado: dict) -> None:
         parar_si_toca()
         _ciclo(bundle, estado)
-        panel.latido()
+        panel.latido(datos_de_la_cuenta)
 
     def al_esperar() -> None:
         parar_si_toca()

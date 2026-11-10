@@ -136,3 +136,19 @@ def test_un_fallo_al_escribir_nunca_interrumpe_al_bot(tmp_path, mt5, caplog):
     finally:
         tb.log.removeHandler(p)
     assert len(mt5.enviadas) == 1  # la orden se envió igual
+
+
+def test_el_latido_publica_la_cuenta_solo_cuando_toca_y_aguanta_sus_fallos(panel):
+    from unittest.mock import Mock
+
+    cuenta = Mock(return_value={"balance": "9994.98", "equity": "9990.00", "moneda": "USD"})
+    panel._ultimo_latido = -math.inf
+    panel.latido(cuenta)
+    texto = panel.ruta.read_text(encoding="utf-8")
+    assert "balance=9994.98" in texto and "equity=9990.00" in texto and "cuenta_leida=" in texto
+    panel.latido(cuenta)  # demasiado pronto: ni publica ni vuelve a leer la cuenta
+    cuenta.assert_called_once()
+    for fallo in (Mock(return_value=None), Mock(side_effect=RuntimeError("terminal caída"))):
+        panel._ultimo_latido = -math.inf
+        panel.latido(fallo)
+        assert "balance=9994.98" in panel.ruta.read_text(encoding="utf-8")  # el latido sale con lo último leído

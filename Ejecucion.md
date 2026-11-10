@@ -242,7 +242,7 @@ No se avisan las probabilidades de cada vela ni el filtro de spread. Un corte de
 | Sesión con duración | La relanza solo por el tiempo que le quedaba; al llegar su hora deja de vigilarla |
 | Detenido desde la ventana | No lo toca: ya no está en la lista |
 
-**Resumen diario:** al cierre de Nueva York (00:00 en hora de los modelos) el vigilante envía por Telegram el estado de cada bot apuntado y, de las últimas 24 horas, sus entradas, cierres y resultado neto, leídos de los `operaciones.csv`. No se conecta a MT5, así que no incluye el balance ni el flotante de las posiciones abiertas. Si el vigilante no estaba en marcha a esa hora, lo envía al arrancar.
+**Resumen diario:** al cierre de Nueva York (00:00 en hora de los modelos) el vigilante envía por Telegram el estado de cada bot apuntado y, de las últimas 24 horas, sus entradas, cierres y resultado neto, leídos de los `operaciones.csv`. La última línea da el balance, la equity y el flotante de la cuenta: cada bot los publica con su latido (cada 5 s) y el vigilante toma los más recientes, sin conectarse a MT5; si ningún bot los publicó en la última hora, esa línea no sale. Si el vigilante no estaba en marcha a esa hora, lo envía al arrancar.
 
 El vigilante solo lanza y termina procesos de `demo_exness_bot.py`; no envía órdenes ni toca posiciones. Si no está en marcha, todo funciona como antes y la ventana lo indica abajo. Para que arranque al iniciar sesión en Windows (y con él los bots apuntados, que abren la terminal si hace falta):
 

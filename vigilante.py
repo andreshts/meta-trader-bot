@@ -38,6 +38,7 @@ MAX_LATIDO_S = 60     # el bot publica al menos cada 5 s; más margen que la ven
 ARRANQUE_S = 90       # tiempo que se le da a un bot recién lanzado antes de juzgarlo; se duplica en cada reintento
 ESTABLE_S = 300       # en marcha este tiempo tras un relanzamiento, los reintentos vuelven a cero
 MAX_REINTENTOS = 5
+CUENTA_RECIENTE_S = 3600  # el resumen no da un balance ni una equity leídos hace más que esto
 MATAR_COLGADO_S = 300  # un bot vivo pero sin latido durante este tiempo se termina y se relanza
 
 log = logging.getLogger("vigilante")
@@ -168,15 +169,34 @@ def _cuantas(n: int, singular: str) -> str:
     return f"{n} {singular}" if n == 1 else f"{n} {singular}s"
 
 
+def linea_de_la_cuenta(paneles: list, ahora: float) -> str | None:
+    """Balance y equity según el bot que los leyó más recientemente; None si ninguno los publicó en la última hora."""
+    def leida(panel: dict) -> float:
+        try:
+            return float(panel.get("cuenta_leida") or 0)
+        except ValueError:
+            return 0.0
+
+    panel = max(paneles, key=leida, default={})
+    try:
+        balance, equity = float(panel["balance"]), float(panel["equity"])
+    except (KeyError, ValueError):
+        return None
+    if ahora - leida(panel) > CUENTA_RECIENTE_S:
+        return None
+    return f"Balance {balance:.2f} · equity {equity:.2f} (flotante {equity - balance:+.2f}) {panel.get('moneda', '')}".strip()
+
+
 def texto_resumen(activos: dict, deseados: dict, ahora: float) -> str | None:
     """Estado de cada bot y sus operaciones de las últimas 24 horas; None si no hay bots apuntados ni operaciones."""
     desde = datetime.fromtimestamp(ahora - 86400).isoformat(timespec="seconds")
-    lineas, total = [], 0.0
+    lineas, total, paneles = [], 0.0, []
     for simbolo, activo in activos.items():
         m = medicion.medir(medicion.leer_filas(activo.carpeta / "operaciones.csv"), desde=desde)
         if simbolo not in deseados and not (m.entradas or m.cerradas):
             continue
         panel = leer_panel(activo.panel)
+        paneles.append(panel)
         try:
             responde = panel.get("estado") == "en_marcha" and ahora - float(panel.get("actualizado") or 0) <= MAX_LATIDO_S
         except ValueError:
@@ -190,7 +210,8 @@ def texto_resumen(activos: dict, deseados: dict, ahora: float) -> str | None:
         total += m.resultado
     if not lineas:
         return None
-    return "\n".join(["📊 Resumen de las últimas 24 horas", *lineas, f"Resultado neto: {total:+.2f}"])
+    cuenta = linea_de_la_cuenta(paneles, ahora)
+    return "\n".join(["📊 Resumen de las últimas 24 horas", *lineas, f"Resultado neto: {total:+.2f}", *([cuenta] if cuenta else [])])
 
 
 # ---------------- el vigilante ----------------
