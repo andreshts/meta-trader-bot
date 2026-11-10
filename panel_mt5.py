@@ -25,7 +25,8 @@ class PanelMT5(logging.Handler):
         self.umbral_long = self.umbral_short = None
         self.datos = {"estado": "en_marcha", "simbolo": simbolo, "cuenta": cuenta, "magic": magic,
                       "fin": SIN_LIMITE if math.isinf(fin) else datetime.fromtimestamp(fin).strftime("%H:%M"),
-                      "umbral_long": "", "umbral_short": ""}
+                      "umbral_long": "", "umbral_short": "",
+                      "pid": os.getpid()}  # con él, el vigilante puede terminar un bot colgado
         self._ultimo_latido = -math.inf
 
     def fijar_umbrales(self, umbral_long, umbral_short) -> None:

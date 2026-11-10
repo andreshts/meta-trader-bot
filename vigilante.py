@@ -7,23 +7,28 @@ al detenerlo. El vigilante mira el latido que cada bot publica para el panel de 
 
 * Sin latido y sin proceso: lo relanza con los mismos ajustes (también tras reiniciar el equipo). Si cae
   MAX_REINTENTOS veces seguidas, avisa y deja de intentarlo.
-* Sin latido pero con el proceso vivo: avisa de que no responde. No lo mata.
+* Sin latido pero con el proceso vivo: avisa de que no responde. Si sigue así MATAR_COLGADO_S, termina el proceso
+  (solo si su línea de órdenes es la del bot de ese activo) y lo relanza. Sus posiciones conservan el stop y el objetivo.
+* Al cierre de Nueva York envía por Telegram el resumen de las últimas 24 horas, leído de los operaciones.csv.
 * Una sesión con duración se relanza solo por el tiempo que le quedaba, y al terminar deja de vigilarse.
 
-Solo lanza procesos de demo_exness_bot.py: nunca envía órdenes ni toca posiciones.
+Solo lanza y termina procesos de demo_exness_bot.py: nunca envía órdenes ni toca posiciones.
 """
 import json
 import logging
 import math
 import os
+import signal
 import subprocess
 import time
+from datetime import datetime
 from pathlib import Path
 
 import alertas
 import config
+import medicion
 import riesgo_cuenta
-from activos import ACTIVOS, Activo
+from activos import ACTIVOS, Activo, hora_modelo
 from cuenta import CUENTA, LOGS
 
 RUTA = LOGS / "vigilante.json"
@@ -33,6 +38,7 @@ MAX_LATIDO_S = 60     # el bot publica al menos cada 5 s; más margen que la ven
 ARRANQUE_S = 90       # tiempo que se le da a un bot recién lanzado antes de juzgarlo; se duplica en cada reintento
 ESTABLE_S = 300       # en marcha este tiempo tras un relanzamiento, los reintentos vuelven a cero
 MAX_REINTENTOS = 5
+MATAR_COLGADO_S = 300  # un bot vivo pero sin latido durante este tiempo se termina y se relanza
 
 log = logging.getLogger("vigilante")
 
@@ -117,13 +123,85 @@ def tiene_el_bloqueo(ruta: Path) -> bool:
         return True
 
 
+def linea_de_ordenes(pid: int) -> str:
+    """La línea de órdenes de ese proceso; vacía si no existe o no se pudo leer."""
+    consulta = f"(Get-CimInstance Win32_Process -Filter 'ProcessId={int(pid)}').CommandLine"
+    try:
+        return subprocess.run(["powershell", "-NoProfile", "-Command", consulta], capture_output=True, text=True, timeout=30,
+                              stdin=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def terminar(activo: Activo, pid: int, linea_de_ordenes=linea_de_ordenes, matar=os.kill) -> bool:
+    """Termina el proceso solo si es el bot de ese activo: el número de un proceso que ya murió puede haber pasado a otro."""
+    linea = linea_de_ordenes(pid)
+    if "demo_exness_bot.py" not in linea or activo.simbolo not in linea.split():
+        return False
+    try:
+        matar(pid, signal.SIGTERM)  # en Windows termina el proceso sin más; su bloqueo queda libre
+    except OSError:
+        return False
+    return True
+
+
+# ---------------- el resumen diario ----------------
+def dia_de_los_modelos(ahora: float) -> int:
+    """Cambia a las 00:00 de la hora de los modelos, es decir, al cierre de Nueva York."""
+    return int(hora_modelo([int(ahora)])[0]) // 86400
+
+
+def resumen_pendiente(ruta_dia: Path, ahora: float) -> bool:
+    """True una vez por día de los modelos, al empezar el siguiente. El primer arranque solo apunta el día."""
+    hoy = dia_de_los_modelos(ahora)
+    try:
+        ultimo = int(ruta_dia.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        ultimo = None
+    if ultimo == hoy:
+        return False
+    ruta_dia.write_text(str(hoy), encoding="utf-8")
+    return ultimo is not None
+
+
+def _cuantas(n: int, singular: str) -> str:
+    return f"{n} {singular}" if n == 1 else f"{n} {singular}s"
+
+
+def texto_resumen(activos: dict, deseados: dict, ahora: float) -> str | None:
+    """Estado de cada bot y sus operaciones de las últimas 24 horas; None si no hay bots apuntados ni operaciones."""
+    desde = datetime.fromtimestamp(ahora - 86400).isoformat(timespec="seconds")
+    lineas, total = [], 0.0
+    for simbolo, activo in activos.items():
+        m = medicion.medir(medicion.leer_filas(activo.carpeta / "operaciones.csv"), desde=desde)
+        if simbolo not in deseados and not (m.entradas or m.cerradas):
+            continue
+        panel = leer_panel(activo.panel)
+        try:
+            responde = panel.get("estado") == "en_marcha" and ahora - float(panel.get("actualizado") or 0) <= MAX_LATIDO_S
+        except ValueError:
+            responde = False
+        estado = "en marcha" if responde else "sin responder" if simbolo in deseados else "detenido"
+        if m.entradas or m.cerradas:
+            detalle = f"{_cuantas(len(m.entradas), 'entrada')}, {_cuantas(len(m.cerradas), 'cierre')}, {m.resultado:+.2f}"
+        else:
+            detalle = "sin operaciones"
+        lineas.append(f"{activo.nombre}: {estado} · {detalle}")
+        total += m.resultado
+    if not lineas:
+        return None
+    return "\n".join(["📊 Resumen de las últimas 24 horas", *lineas, f"Resultado neto: {total:+.2f}"])
+
+
 # ---------------- el vigilante ----------------
 class Vigilante:
     def __init__(self, activos: dict = ACTIVOS, ruta: Path = RUTA, lanzar=lanzar, avisar=log.warning, reloj=time.time,
-                 vivo=tiene_el_bloqueo):
+                 vivo=tiene_el_bloqueo, terminar=terminar):
         self.activos, self.ruta, self.lanzar, self.avisar, self.reloj, self.vivo = activos, ruta, lanzar, avisar, reloj, vivo
+        self.terminar = terminar
         self.intentos = {}      # símbolo -> (relanzamientos seguidos, hora del último)
-        self.colgados = set()   # ya se avisó de que no responden
+        self.colgados = {}      # símbolo -> desde cuándo se le ve vivo pero sin latido (ya se avisó)
+        self.sin_terminar = set()  # colgados que no se pudieron terminar: no se insiste
 
     def revisar(self) -> None:
         ahora = self.reloj()
@@ -146,8 +224,8 @@ class Vigilante:
             latido = 0.0
         intentos, lanzado = self.intentos.get(simbolo, (0, -math.inf))
         if panel.get("estado") == "en_marcha" and ahora - latido <= MAX_LATIDO_S:
-            if simbolo in self.colgados:
-                self.colgados.discard(simbolo)
+            self.sin_terminar.discard(simbolo)
+            if self.colgados.pop(simbolo, None) is not None:
                 self.avisar(f"✅ {simbolo}: vuelve a responder")
             if intentos and ahora - lanzado >= ESTABLE_S:
                 del self.intentos[simbolo]
@@ -156,10 +234,13 @@ class Vigilante:
             return  # recién relanzado: todavía puede estar arrancando
         if self.vivo(activo.bloqueo):
             if simbolo not in self.colgados:
-                self.colgados.add(simbolo)
+                self.colgados[simbolo] = ahora
                 self.avisar(f"⚠️ {simbolo}: el proceso sigue vivo pero no da señales desde hace {ahora - latido:.0f} s")
+            elif ahora - self.colgados[simbolo] >= MATAR_COLGADO_S and simbolo not in self.sin_terminar:
+                self._terminar_colgado(activo, panel, ahora)
             return
-        self.colgados.discard(simbolo)
+        self.colgados.pop(simbolo, None)
+        self.sin_terminar.discard(simbolo)
         motivo = ultima_linea(activo.salida)
         if intentos >= MAX_REINTENTOS:
             dejar_de_desear(self.ruta, simbolo)
@@ -170,6 +251,20 @@ class Vigilante:
         self.intentos[simbolo] = (intentos + 1, ahora)
         self.avisar(f"🔄 {simbolo}: no estaba en marcha y se relanzó (intento {intentos + 1} de {MAX_REINTENTOS})"
                     + (f". Último mensaje: {motivo}" if motivo else ""))
+
+
+    def _terminar_colgado(self, activo: Activo, panel: dict, ahora: float) -> None:
+        simbolo = activo.simbolo
+        try:
+            pid = int(panel.get("pid") or 0)
+        except ValueError:
+            pid = 0
+        if pid and self.terminar(activo, pid):
+            self.colgados[simbolo] = ahora  # si no muere, se vuelve a intentar pasado el mismo plazo
+            self.avisar(f"🔪 {simbolo}: seguía sin responder y se terminó su proceso; se relanza a continuación")
+        else:
+            self.sin_terminar.add(simbolo)
+            self.avisar(f"🛑 {simbolo}: sigue sin responder y no se pudo terminar su proceso; hay que cerrarlo a mano")
 
 
 def main() -> None:
@@ -191,6 +286,10 @@ def main() -> None:
             while True:
                 try:
                     vigilante.revisar()
+                    if resumen_pendiente(RUTA.with_name("resumen_dia.txt"), time.time()):
+                        resumen = texto_resumen(ACTIVOS, leer_deseados(RUTA), time.time())
+                        if resumen:
+                            avisar(resumen)
                     latido.write_text(str(int(time.time())), encoding="utf-8")
                 except Exception:
                     log.exception("Error al revisar los bots; se reintenta")

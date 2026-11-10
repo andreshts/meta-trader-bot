@@ -237,12 +237,14 @@ No se avisan las probabilidades de cada vela ni el filtro de spread. Un corte de
 | Situación | Qué hace |
 | :--- | :--- |
 | Sin latido en 60 s y sin proceso (se cayó, se mató, se reinició el equipo) | Lo relanza con los mismos ajustes y avisa por Telegram, con la última línea que dejó el bot |
-| Sin latido pero con el proceso vivo (colgado) | Avisa una vez; no lo mata. Avisa también cuando vuelve a responder |
+| Sin latido pero con el proceso vivo (colgado) | Avisa una vez, y también cuando vuelve a responder. Si sigue así 5 minutos (`MATAR_COLGADO_S`), termina el proceso y lo relanza; las posiciones conservan su stop y su objetivo, y el bot reconcilia al arrancar. Solo lo termina si la línea de órdenes de ese proceso es la de `demo_exness_bot.py` con ese símbolo; si no puede, avisa una vez de que hay que cerrarlo a mano |
 | Cae 5 veces seguidas (espera 90 s, 180 s, 360 s… entre intentos) | Avisa, lo borra de la lista y no lo relanza más. Cinco minutos en marcha ponen la cuenta a cero |
 | Sesión con duración | La relanza solo por el tiempo que le quedaba; al llegar su hora deja de vigilarla |
 | Detenido desde la ventana | No lo toca: ya no está en la lista |
 
-El vigilante solo lanza procesos de `demo_exness_bot.py`; no envía órdenes ni toca posiciones. Si no está en marcha, todo funciona como antes y la ventana lo indica abajo. Para que arranque al iniciar sesión en Windows (y con él los bots apuntados, que abren la terminal si hace falta):
+**Resumen diario:** al cierre de Nueva York (00:00 en hora de los modelos) el vigilante envía por Telegram el estado de cada bot apuntado y, de las últimas 24 horas, sus entradas, cierres y resultado neto, leídos de los `operaciones.csv`. No se conecta a MT5, así que no incluye el balance ni el flotante de las posiciones abiertas. Si el vigilante no estaba en marcha a esa hora, lo envía al arrancar.
+
+El vigilante solo lanza y termina procesos de `demo_exness_bot.py`; no envía órdenes ni toca posiciones. Si no está en marcha, todo funciona como antes y la ventana lo indica abajo. Para que arranque al iniciar sesión en Windows (y con él los bots apuntados, que abren la terminal si hace falta):
 
 ```bat
 schtasks /Create /TN "RF Bot vigilante" /SC ONLOGON /TR "C:\Otros\metatrader-bot\iniciar_vigilante.bat"

@@ -27,9 +27,9 @@ class Escena:
     def __init__(self, tmp_path):
         self.ahora, self.ruta, self.vivos = AHORA, tmp_path / "vigilante.json", set()
         self.oro = crear_activo(tmp_path)
-        self.lanzar, self.avisos = Mock(), []
+        self.lanzar, self.avisos, self.terminar = Mock(), [], Mock(return_value=True)
         self.vigilante = vg.Vigilante({self.oro.simbolo: self.oro}, self.ruta, self.lanzar, self.avisos.append,
-                                      lambda: self.ahora, lambda bloqueo: bloqueo in self.vivos)
+                                      lambda: self.ahora, lambda bloqueo: bloqueo in self.vivos, self.terminar)
 
     def pasan(self, segundos):
         self.ahora += segundos
@@ -185,3 +185,90 @@ def test_lanzar_arranca_el_proceso_y_guarda_su_salida(tmp_path):
     assert isinstance(proceso, subprocess.Popen) and proceso.wait(timeout=30) == 0
     assert vg.ultima_linea(activo.salida) == "hola desde el bot"
     assert json.loads(json.dumps(vg.leer_panel(activo.panel))) == {}
+
+
+def colgar(escena, pid="4321"):
+    vg.desear(escena.ruta, "XAUUSDm", ORDEN, None)
+    escena.oro.panel.write_text(f"estado=en_marcha\nactualizado={int(AHORA - 300)}\npid={pid}\n", encoding="utf-8")
+    escena.vivos.add(escena.oro.bloqueo)
+    escena.pasan(0)
+
+
+def test_un_bot_colgado_se_termina_pasado_el_plazo_y_luego_se_relanza(escena):
+    colgar(escena)
+    escena.pasan(vg.MATAR_COLGADO_S - 10)
+    escena.terminar.assert_not_called()
+    escena.pasan(10)
+    escena.terminar.assert_called_once_with(escena.oro, 4321)
+    assert "se terminó su proceso" in escena.avisos[-1]
+    escena.pasan(10)
+    assert escena.terminar.call_count == 1  # no se repite en cada revisión
+    escena.vivos.clear()  # el proceso murió y soltó su bloqueo
+    escena.pasan(10)
+    escena.lanzar.assert_called_once()
+    assert "se relanzó" in escena.avisos[-1]
+
+
+@pytest.mark.parametrize("pid,se_puede", [("4321", False), ("", True), ("abc", True)])
+def test_si_no_se_puede_terminar_se_avisa_una_vez_y_no_se_insiste(escena, pid, se_puede):
+    escena.terminar.return_value = se_puede
+    colgar(escena, pid)
+    escena.pasan(vg.MATAR_COLGADO_S)
+    escena.pasan(vg.MATAR_COLGADO_S)
+    assert escena.terminar.call_count == (1 if pid == "4321" else 0)
+    assert [a for a in escena.avisos if "cerrarlo a mano" in a] == [escena.avisos[-1]]
+    escena.lanzar.assert_not_called()
+
+
+def test_solo_se_termina_el_proceso_que_es_el_bot_de_ese_activo(tmp_path):
+    oro, matar = crear_activo(tmp_path), Mock()
+    del_oro = r"C:\venv\python.exe C:\bot\demo_exness_bot.py --simbolo XAUUSDm --volumen 0.01"
+    for linea in ("", "notepad.exe", del_oro.replace("XAUUSDm", "US500m"), r"python.exe otro.py --simbolo XAUUSDm"):
+        assert not vg.terminar(oro, 4321, lambda pid: linea, matar)
+    matar.assert_not_called()
+    assert vg.terminar(oro, 4321, lambda pid: del_oro, matar)
+    matar.assert_called_once()
+    matar.side_effect = OSError("acceso denegado")
+    assert not vg.terminar(oro, 4321, lambda pid: del_oro, matar)
+
+
+def test_la_linea_de_ordenes_de_este_mismo_proceso_se_puede_leer():
+    import os
+    assert "pytest" in vg.linea_de_ordenes(os.getpid())
+    assert vg.linea_de_ordenes(0x7FFFFFF0) == ""  # no existe
+
+
+def test_el_resumen_toca_una_vez_al_cambiar_el_dia_de_los_modelos(tmp_path):
+    ruta, cierre = tmp_path / "resumen_dia.txt", 1794261600  # 2026-11-09 22:00 UTC = 17:00 en Nueva York
+    assert vg.dia_de_los_modelos(cierre) == vg.dia_de_los_modelos(cierre - 1) + 1
+    assert not vg.resumen_pendiente(ruta, cierre - 3600)  # primer arranque: solo apunta el día
+    assert not vg.resumen_pendiente(ruta, cierre - 60)
+    assert vg.resumen_pendiente(ruta, cierre + 5)
+    assert not vg.resumen_pendiente(ruta, cierre + 15)
+
+
+def test_el_resumen_cuenta_las_operaciones_de_las_ultimas_24_horas(tmp_path):
+    import csv
+    from datetime import datetime
+
+    import trading_bot
+
+    oro, dax, plata = crear_activo(tmp_path), crear_activo(tmp_path, "DE30m"), crear_activo(tmp_path, "XAGUSDm")
+    activos = {a.simbolo: a for a in (oro, dax, plata)}
+    assert vg.texto_resumen(activos, {}, AHORA) is None
+
+    def fecha(hace_s):
+        return datetime.fromtimestamp(AHORA - hace_s).isoformat(timespec="seconds")
+
+    filas = [{"fecha": fecha(90000), "evento": "cierre", "ticket": "1", "beneficio": "100"},  # de ayer: no cuenta
+             {"fecha": fecha(7200), "evento": "Apertura LONG", "ticket": "2", "tipo": "BUY", "slippage_puntos": "1", "retcode": "10009"},
+             {"fecha": fecha(3600), "evento": "cierre", "ticket": "2", "beneficio": "-5.02", "swap": "0"}]
+    oro.carpeta.mkdir()
+    with open(oro.carpeta / "operaciones.csv", "w", newline="", encoding="utf-8") as f:
+        escritor = csv.DictWriter(f, fieldnames=trading_bot.CAMPOS_OPERACIONES)
+        escritor.writeheader()
+        escritor.writerows(filas)
+    publicar(dax, AHORA - 5)
+    lineas = vg.texto_resumen(activos, {"DE30m": {}, "XAGUSDm": {}}, AHORA).splitlines()
+    assert lineas[1:] == ["XAUUSDm: detenido · 1 entrada, 1 cierre, -5.02", "DE30m: en marcha · sin operaciones",
+                          "XAGUSDm: sin responder · sin operaciones", "Resultado neto: -5.02"]
