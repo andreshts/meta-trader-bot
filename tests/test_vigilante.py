@@ -291,3 +291,86 @@ def test_el_resumen_lleva_el_balance_y_la_equity_mas_recientes(tmp_path):
     publicar_cuenta(oro, vg.CUENTA_RECIENTE_S + 200, "1", "1")
     publicar_cuenta(dax, vg.CUENTA_RECIENTE_S + 100, "2", "2")
     assert "Balance" not in vg.texto_resumen(activos, deseados, AHORA)  # demasiado antiguos para darlos por buenos
+
+
+# ---------------- consultas por Telegram ----------------
+def test_estado_dice_como_esta_cada_bot_y_lo_ultimo_que_dijo(tmp_path):
+    oro, dax, plata = crear_activo(tmp_path), crear_activo(tmp_path, "DE30m"), crear_activo(tmp_path, "XAGUSDm")
+    activos, ruta = {a.simbolo: a for a in (oro, dax, plata)}, tmp_path / "vigilante.json"
+    assert vg.atender("/estado", activos, ruta, AHORA) == "Ningún bot en marcha"
+    oro.panel.write_text(f"estado=en_marcha\nactualizado={int(AHORA)}\nnota=Sin señal\nnota_hora=10:15:00\nbalance=100\n"
+                         f"equity=101\nmoneda=USD\ncuenta_leida={int(AHORA)}\n", encoding="utf-8")
+    vg.desear(ruta, "DE30m", ORDEN, None)
+    assert vg.atender(" /ESTADO@mi_bot ", activos, ruta, AHORA).splitlines() == [
+        "XAUUSDm (XAUUSDm): en marcha · 10:15:00 Sin señal", "DE30m (DE30m): sin responder",
+        "Balance 100.00 · equity 101.00 (flotante +1.00) USD"]
+
+
+def test_resumen_y_ayuda(tmp_path):
+    oro = crear_activo(tmp_path)
+    activos, ruta = {oro.simbolo: oro}, tmp_path / "vigilante.json"
+    assert "Sin bots apuntados" in vg.atender("/resumen", activos, ruta, AHORA)
+    vg.desear(ruta, "XAUUSDm", ORDEN, None)
+    assert "Resumen de las últimas 24 horas" in vg.atender("/resumen", activos, ruta, AHORA)
+    for texto in ("hola", "/start", "/otra cosa", ""):
+        assert vg.atender(texto, activos, ruta, AHORA) == vg.AYUDA
+
+
+def test_detener_hace_lo_mismo_que_el_boton_de_la_ventana(tmp_path):
+    oro, dax = crear_activo(tmp_path), crear_activo(tmp_path, "DE30m")
+    activos, ruta = {a.simbolo: a for a in (oro, dax)}, tmp_path / "vigilante.json"
+    for simbolo, activo in activos.items():
+        vg.desear(ruta, simbolo, ORDEN, None)
+        publicar(activo, AHORA)
+    for sin_efecto, respuesta in (("/detener", "Indica cuál"), ("/detener EURUSDm", "Indica cuál")):
+        assert respuesta in vg.atender(sin_efecto, activos, ruta, AHORA)
+    assert not oro.detener.exists() and set(vg.leer_deseados(ruta)) == {"XAUUSDm", "DE30m"}
+
+    assert "enviada a XAUUSDm" in vg.atender("/detener xauusd", activos, ruta, AHORA)
+    assert oro.detener.exists() and not dax.detener.exists() and set(vg.leer_deseados(ruta)) == {"DE30m"}
+    publicar(oro, AHORA, "detenido")
+    oro.detener.unlink()
+    assert "no está en marcha" in vg.atender("/detener XAUUSDm", activos, ruta, AHORA) and not oro.detener.exists()
+
+    assert "enviada a DE30m" in vg.atender("/detener todos", activos, ruta, AHORA)
+    assert dax.detener.exists() and vg.leer_deseados(ruta) == {}
+    publicar(dax, AHORA, "detenido")
+    assert vg.atender("/detener todos", activos, ruta, AHORA) == "Ningún bot en marcha"
+
+
+def test_solo_se_atiende_el_chat_configurado():
+    novedades = [{"update_id": 1, "message": {"chat": {"id": 42}, "text": "/estado"}},
+                 {"update_id": 2, "message": {"chat": {"id": 666}, "text": "/detener todos"}},
+                 {"update_id": 3, "message": {"chat": {"id": 42}, "photo": []}}, {"update_id": 4, "edited_message": {}}]
+    assert vg.mensajes_nuevos(novedades, "42") == ["/estado"]
+
+
+def test_la_escucha_ignora_lo_anterior_al_arranque_y_sobrevive_a_los_fallos():
+    import alertas
+
+    viejo = {"update_id": 7, "message": {"chat": {"id": 42}, "text": "/detener todos"}}
+    nuevo = {"update_id": 8, "message": {"chat": {"id": 42}, "text": "/estado"}}
+    roto = {"update_id": 9, "message": {"chat": {"id": 42}, "text": "/rompe"}}
+    respuestas = [{"result": [viejo]}, alertas.ErrorTelegram("sin red"), {"result": [nuevo]}, {"ok": True},
+                  {"result": [roto]}, {"ok": True}, {"result": []}]
+    llamadas, atendidos, esperas = [], [], []
+
+    def llamar(token, metodo, parametros):
+        llamadas.append((metodo, parametros))
+        respuesta = respuestas.pop(0)
+        if isinstance(respuesta, Exception):
+            raise respuesta
+        return respuesta
+
+    def atender(texto):
+        atendidos.append(texto)
+        if texto == "/rompe":
+            raise RuntimeError("fallo")
+        return "todo bien"
+
+    vg.escuchar_telegram("token", "42", atender, llamar, esperas.append, seguir=lambda: bool(respuestas))
+    assert atendidos == ["/estado", "/rompe"] and esperas == [30]
+    assert llamadas[0] == ("getUpdates", {"offset": -1})
+    assert [p["offset"] for m, p in llamadas[1:] if m == "getUpdates"] == [8, 8, 9, 10]
+    enviados = [p["text"] for m, p in llamadas if m == "sendMessage"]
+    assert enviados == ["todo bien", "No se pudo atender la consulta (RuntimeError)"]

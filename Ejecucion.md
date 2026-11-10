@@ -245,6 +245,16 @@ No se avisan las probabilidades de cada vela ni el filtro de spread. Un corte de
 
 **Resumen diario:** al cierre de Nueva York (00:00 en hora de los modelos) el vigilante envía por Telegram el estado de cada bot apuntado y, de las últimas 24 horas, sus entradas, cierres y resultado neto, leídos de los `operaciones.csv`. La última línea da el balance, la equity y el flotante de la cuenta: cada bot los publica con su latido (cada 5 s) y el vigilante toma los más recientes, sin conectarse a MT5; si ningún bot los publicó en la última hora, esa línea no sale. Si el vigilante no estaba en marcha a esa hora, lo envía al arrancar.
 
+**Consultas por Telegram:** con Telegram configurado, el vigilante responde a los mensajes que le llegan desde el chat de `TELEGRAM_CHAT_ID` (los de cualquier otro chat se ignoran):
+
+| Mensaje | Respuesta |
+|---|---|
+| `/estado` | Cada bot apuntado o en marcha, con lo último que dijo, y el balance, la equity y el flotante de la cuenta |
+| `/resumen` | El resumen de las últimas 24 horas, el mismo que se envía al cierre |
+| `/detener SIMBOLO` o `/detener todos` | Lo mismo que el botón Detener de la ventana: el bot deja de vigilarse y termina; sus posiciones conservan el stop y el objetivo |
+
+No hay orden para iniciar bots ni para cerrar posiciones. Los mensajes escritos mientras el vigilante estaba parado no se atienden al arrancar. Mientras el vigilante escucha, `python alertas.py --chat` puede fallar: Telegram solo admite un lector a la vez.
+
 El vigilante solo lanza y termina procesos de `demo_exness_bot.py`; no envía órdenes ni toca posiciones. Si no está en marcha, todo funciona como antes y la ventana lo indica abajo. Para que arranque al iniciar sesión en Windows (y con él los bots apuntados, que abren la terminal si hace falta):
 
 ```bat

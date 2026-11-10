@@ -10,6 +10,7 @@ al detenerlo. El vigilante mira el latido que cada bot publica para el panel de 
 * Sin latido pero con el proceso vivo: avisa de que no responde. Si sigue así MATAR_COLGADO_S, termina el proceso
   (solo si su línea de órdenes es la del bot de ese activo) y lo relanza. Sus posiciones conservan el stop y el objetivo.
 * Al cierre de Nueva York envía por Telegram el resumen de las últimas 24 horas, leído de los operaciones.csv.
+* Atiende las consultas que le llegan por Telegram desde el chat configurado: /estado, /resumen y /detener.
 * Una sesión con duración se relanza solo por el tiempo que le quedaba, y al terminar deja de vigilarse.
 
 Solo lanza y termina procesos de demo_exness_bot.py: nunca envía órdenes ni toca posiciones.
@@ -20,6 +21,7 @@ import math
 import os
 import signal
 import subprocess
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +40,10 @@ MAX_LATIDO_S = 60     # el bot publica al menos cada 5 s; más margen que la ven
 ARRANQUE_S = 90       # tiempo que se le da a un bot recién lanzado antes de juzgarlo; se duplica en cada reintento
 ESTABLE_S = 300       # en marcha este tiempo tras un relanzamiento, los reintentos vuelven a cero
 MAX_REINTENTOS = 5
+EN_MARCHA = "en marcha"
+SONDEO_TELEGRAM_S = 5  # cada cuánto vuelve Telegram con las manos vacías si nadie escribe
+AYUDA = ("Consultas:\n/estado: cómo está cada bot y la cuenta\n/resumen: operaciones de las últimas 24 horas\n"
+         "/detener SIMBOLO: detiene ese bot (o /detener todos); sus posiciones conservan el stop y el objetivo")
 CUENTA_RECIENTE_S = 3600  # el resumen no da un balance ni una equity leídos hace más que esto
 MATAR_COLGADO_S = 300  # un bot vivo pero sin latido durante este tiempo se termina y se relanza
 
@@ -187,6 +193,14 @@ def linea_de_la_cuenta(paneles: list, ahora: float) -> str | None:
     return f"Balance {balance:.2f} · equity {equity:.2f} (flotante {equity - balance:+.2f}) {panel.get('moneda', '')}".strip()
 
 
+def estado_del_bot(panel: dict, deseado: bool, ahora: float) -> str:
+    try:
+        responde = panel.get("estado") == "en_marcha" and ahora - float(panel.get("actualizado") or 0) <= MAX_LATIDO_S
+    except ValueError:
+        responde = False
+    return EN_MARCHA if responde else "sin responder" if deseado else "detenido"
+
+
 def texto_resumen(activos: dict, deseados: dict, ahora: float) -> str | None:
     """Estado de cada bot y sus operaciones de las últimas 24 horas; None si no hay bots apuntados ni operaciones."""
     desde = datetime.fromtimestamp(ahora - 86400).isoformat(timespec="seconds")
@@ -197,11 +211,7 @@ def texto_resumen(activos: dict, deseados: dict, ahora: float) -> str | None:
             continue
         panel = leer_panel(activo.panel)
         paneles.append(panel)
-        try:
-            responde = panel.get("estado") == "en_marcha" and ahora - float(panel.get("actualizado") or 0) <= MAX_LATIDO_S
-        except ValueError:
-            responde = False
-        estado = "en marcha" if responde else "sin responder" if simbolo in deseados else "detenido"
+        estado = estado_del_bot(panel, simbolo in deseados, ahora)
         if m.entradas or m.cerradas:
             detalle = f"{_cuantas(len(m.entradas), 'entrada')}, {_cuantas(len(m.cerradas), 'cierre')}, {m.resultado:+.2f}"
         else:
@@ -212,6 +222,83 @@ def texto_resumen(activos: dict, deseados: dict, ahora: float) -> str | None:
         return None
     cuenta = linea_de_la_cuenta(paneles, ahora)
     return "\n".join(["📊 Resumen de las últimas 24 horas", *lineas, f"Resultado neto: {total:+.2f}", *([cuenta] if cuenta else [])])
+
+
+# ---------------- consultas por Telegram ----------------
+def texto_estado(activos: dict, deseados: dict, ahora: float) -> str:
+    """Cómo está cada bot apuntado o en marcha, con lo último que dijo, y la cuenta."""
+    lineas, paneles = [], []
+    for simbolo, activo in activos.items():
+        panel = leer_panel(activo.panel)
+        estado = estado_del_bot(panel, simbolo in deseados, ahora)
+        if estado == "detenido":
+            continue
+        paneles.append(panel)
+        nota = f" · {panel.get('nota_hora', '')} {panel.get('nota', '')}".rstrip() if estado == EN_MARCHA and panel.get("nota") else ""
+        lineas.append(f"{activo.nombre} ({simbolo}): {estado}{nota}")
+    cuenta = linea_de_la_cuenta(paneles, ahora)
+    return "\n".join([*(lineas or ["Ningún bot en marcha"]), *([cuenta] if cuenta else [])])
+
+
+def detener_bots(activos: dict, ruta: Path, cual: str, ahora: float) -> str:
+    """Lo mismo que el botón Detener de la ventana: deja de vigilarlo y le pide al bot que termine."""
+    deseados = leer_deseados(ruta)
+    en_marcha = [s for s, a in activos.items() if estado_del_bot(leer_panel(a.panel), s in deseados, ahora) != "detenido"]
+    pedido = cual.strip().lower()
+    elegidos = en_marcha if pedido == "todos" else [s for s in activos if pedido in (s.lower(), s.lower().removesuffix("m"))]
+    if not pedido or (pedido != "todos" and not elegidos):
+        return f"Indica cuál: /detener todos o /detener seguido de {', '.join(activos)}"
+    elegidos = [s for s in elegidos if s in en_marcha]
+    if not elegidos:
+        return "Ningún bot en marcha" if pedido == "todos" else f"{cual.strip()} no está en marcha"
+    for simbolo in elegidos:
+        dejar_de_desear(ruta, simbolo)  # antes: que el vigilante no lo relance
+        activos[simbolo].carpeta.mkdir(parents=True, exist_ok=True)
+        activos[simbolo].detener.touch()
+    return f"Orden de detener enviada a {', '.join(elegidos)}. Sus posiciones abiertas conservan el stop y el objetivo"
+
+
+def atender(texto: str, activos: dict, ruta: Path, ahora: float) -> str:
+    """La respuesta a un mensaje del chat."""
+    orden, _, resto = texto.strip().partition(" ")
+    orden = orden.lower().partition("@")[0]  # en un grupo, Telegram añade @nombre_del_bot
+    if orden == "/estado":
+        return texto_estado(activos, leer_deseados(ruta), ahora)
+    if orden == "/resumen":
+        return texto_resumen(activos, leer_deseados(ruta), ahora) or "Sin bots apuntados ni operaciones en las últimas 24 horas"
+    if orden == "/detener":
+        return detener_bots(activos, ruta, resto, ahora)
+    return AYUDA
+
+
+def mensajes_nuevos(novedades: list, chat: str) -> list:
+    """Los textos que llegaron desde el chat configurado; lo de cualquier otro chat se ignora."""
+    mensajes = (n.get("message") or {} for n in novedades)
+    return [m["text"] for m in mensajes if str((m.get("chat") or {}).get("id")) == str(chat) and isinstance(m.get("text"), str)]
+
+
+def escuchar_telegram(token: str, chat: str, atender, llamar=alertas._llamar, esperar=time.sleep, seguir=lambda: True) -> None:
+    """Bucle de consultas. Lo que se escribió antes de arrancar no se atiende: un /detener viejo no debe parar nada."""
+    siguiente = None
+    while seguir():
+        try:
+            if siguiente is None:
+                ultimas = llamar(token, "getUpdates", {"offset": -1}).get("result", [])
+                siguiente = ultimas[-1]["update_id"] + 1 if ultimas else 0
+                continue
+            novedades = llamar(token, "getUpdates", {"offset": siguiente, "timeout": SONDEO_TELEGRAM_S}).get("result", [])
+            if novedades:
+                siguiente = novedades[-1]["update_id"] + 1
+            for texto in mensajes_nuevos(novedades, chat):
+                try:
+                    respuesta = atender(texto)
+                except Exception as e:
+                    log.exception("Error al atender una consulta de Telegram")
+                    respuesta = f"No se pudo atender la consulta ({type(e).__name__})"
+                llamar(token, "sendMessage", {"chat_id": chat, "text": respuesta[:alertas.MAX_CARACTERES]})
+        except Exception as e:
+            log.debug("Consultas de Telegram: %s", e if isinstance(e, alertas.ErrorTelegram) else type(e).__name__)
+            esperar(30)
 
 
 # ---------------- el vigilante ----------------
@@ -299,6 +386,10 @@ def main() -> None:
         if avisos is not None:
             avisos.avisar(texto)
 
+    token, chat = alertas.credenciales()
+    if token is not None:
+        threading.Thread(target=escuchar_telegram, daemon=True, name="consultas-telegram",
+                         args=(token, chat, lambda texto: atender(texto, ACTIVOS, RUTA, time.time()))).start()
     latido = RUTA.with_name("vigilante.txt")  # la ventana muestra si el vigilante está en marcha
     try:
         with riesgo_cuenta.turno(RUTA.with_name("vigilante.lock"), espera_s=0):
