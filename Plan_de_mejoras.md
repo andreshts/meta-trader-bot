@@ -13,7 +13,7 @@ Una mejora del modelo (feature, régimen, filtro, re-entrenamiento) solo cuenta 
 1. **Fijar la variante antes de mirar resultados:** qué se añade, con qué parámetros y qué se espera. No se ajustan parámetros viendo el test.
 2. **Walk-forward desde 2010** (`train_model.py`: 5 ventanas, purga por el final de cada etiqueta, 3 semillas), comparando contra la línea base, **con los mismos datos**.
 3. **Criterio:** que suba el ROC-AUC de forma estable entre ventanas **y** que la esperanza agregada mejore con las 3 semillas. Solo se considera ventaja real con `t >= 2` en todas las semillas, y además en el holdout (≥ 30 trades).
-4. **Contar las pruebas.** Cada variante evaluada sobre los mismos datos aumenta la probabilidad de un falso positivo. Llevamos **unas 49 variantes** (38 en EURUSD desde 2010 y 11 en el banco de experimentos sobre los 5 activos de Exness). Con tantas, un `t` cercano a 2 aislado no significa nada (ver [Entrenamiento.md](Entrenamiento.md)).
+4. **Contar las pruebas.** Cada variante evaluada sobre los mismos datos aumenta la probabilidad de un falso positivo. Llevamos **unas 53 variantes** (38 en EURUSD desde 2010 y 15 en el banco de experimentos sobre los 5 activos de Exness). Con tantas, un `t` cercano a 2 aislado no significa nada (ver [Entrenamiento.md](Entrenamiento.md)).
 5. **No tocar el holdout** (desde `HOLDOUT_DESDE = 2026-10-30`) para elegir variantes. Solo decide el despliegue final.
 6. **Pruebas automáticas** (`python -m pytest tests`) para el código nuevo, en particular contra fugas de datos del futuro, y documentar el resultado en [Entrenamiento.md](Entrenamiento.md).
 
@@ -144,6 +144,12 @@ Depende de 2.3 (ADX). Clasifica el mercado en tendencia alcista, tendencia bajis
   - Motivo: desplazar la ventana 92 velas movió el `t` más de 3 puntos.
   - Hecho cuando: está integrado en `train_model.py` y en el bloqueo del bot, con pruebas.
   - Resultado:
+- ❌ **4.6 Otros modelos sobre las mismas 11 features** (2026-11-10, [experimentos.py](experimentos.py), 5 activos, 3 semillas; hiperparámetros fijados antes de ver resultados, todo con scikit-learn). `t` medio por activo en EUR/USD, oro, S&P 500, Nasdaq y DAX; la base (Random Forest de 150 árboles, profundidad 5) da −0.08 / +0.60 / −0.48 / −0.47 / −1.91:
+  - `boosting` (gradient boosting por histogramas, 200 árboles de profundidad 3, tasa 0,05): −2.36 / −1.86 / −0.95 / −2.12 / −0.52. Peor en 4 de 5 y con menos ROC-AUC (0.50–0.55).
+  - `logistica` (regresión logística, features normalizadas, C = 0,1): −1.09 / −0.50 / −3.24 / +0.46 / 0. Mejora solo en el Nasdaq; en el DAX no opera.
+  - `bosque_500` (el mismo bosque con 500 árboles): −0.79 / +0.03 / −0.85 / −0.32 / −2.76. El ROC-AUC es idéntico al de la base y la dispersión entre semillas baja: en EUR/USD pasa de +2.23 / −1.34 / −1.12 a −0.96 / −0.79 / −0.61, así que el +2.23 de la semilla 42 era suerte del bosque.
+  - `bosque_profundo` (500 árboles, profundidad 10, hojas de 50): −2.24 / −1.96 / −2.08 / +0.12 / −1.40. Más capacidad, peor resultado: sobreajuste.
+  - Conclusión: el límite no es el tipo de modelo. Los más flexibles empeoran, y el más estable (500 árboles) confirma un resultado ligeramente negativo.
 - [ ] 🔒 **4.5 Re-entrenamiento periódico automático** (por ejemplo, semanal con el Programador de tareas): reentrena, guarda la copia en `models/historico/` y el bot solo carga el modelo nuevo si pasa el bloqueo.
   - Bloqueado hasta que haya un modelo con ventaja: reentrenar un modelo sin ventaja no la crea.
   - Hecho cuando: está programado, con registro de cada reentrenamiento y vuelta automática al modelo anterior si el nuevo no pasa.
@@ -255,4 +261,5 @@ La dirección de EURUSD M15 no se puede predecir con velas (Fases 2 y 5), y en p
 | 2026-11-10 | Reglas de cartera (1.7): `cartera.py` y opciones del bot; la reducción en drawdown baja el drawdown máximo un 42 %, las otras dos apenas cambian nada. |
 | 2026-11-10 | Informe de rendimiento ([informe.py](informe.py)): estadísticas en R y desgloses por activo, lado, salida y sesión, con la esperanza del backtest al lado; semanal por Telegram desde el vigilante y bajo demanda con `/informe`. |
 | 2026-11-10 | Fase 5: inventario de ticks de Exness (5.1, hecho: solo desde 2026-01-01 y solo bid/ask), features de ticks bloqueadas por falta de histórico (5.2) y libro de órdenes descartado (5.3). |
+| 2026-11-10 | Otros modelos (4.6): gradient boosting, regresión logística y dos Random Forest mayores, ❌ ninguno mejora; con 500 árboles baja la dispersión entre semillas. |
 | 2026-11-02 | Añadida y evaluada 6.2 (cartera diversificada por sectores; enmienda de los índices con ETFs por falta de datos): ❌ sin ventaja. `tendencia.py --diversificada`, con filtro de calidad, pesos por sector y aviso de spreads erróneos (138 tests). |
