@@ -10,6 +10,7 @@ al detenerlo. El vigilante mira el latido que cada bot publica para el panel de 
 * Sin latido pero con el proceso vivo: avisa de que no responde. Si sigue así MATAR_COLGADO_S, termina el proceso
   (solo si su línea de órdenes es la del bot de ese activo) y lo relanza. Sus posiciones conservan el stop y el objetivo.
 * Al cierre de Nueva York envía por Telegram el resumen de las últimas 24 horas, leído de los operaciones.csv.
+* Al cierre de cada viernes lanza informe.py, que envía por Telegram el informe de rendimiento de la semana.
 * Atiende las consultas que le llegan por Telegram desde el chat configurado: /estado, /resumen y /detener.
 * Una sesión con duración se relanza solo por el tiempo que le quedaba, y al terminar deja de vigilarse.
 
@@ -21,6 +22,7 @@ import math
 import os
 import signal
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime
@@ -43,6 +45,7 @@ MAX_REINTENTOS = 5
 EN_MARCHA = "en marcha"
 SONDEO_TELEGRAM_S = 5  # cada cuánto vuelve Telegram con las manos vacías si nadie escribe
 AYUDA = ("Consultas:\n/estado: cómo está cada bot y la cuenta\n/resumen: operaciones de las últimas 24 horas\n"
+         "/informe: rendimiento de los últimos 7 días, con desgloses\n"
          "/detener SIMBOLO: detiene ese bot (o /detener todos); sus posiciones conservan el stop y el objetivo")
 CUENTA_RECIENTE_S = 3600  # el resumen no da un balance ni una equity leídos hace más que esto
 MATAR_COLGADO_S = 300  # un bot vivo pero sin latido durante este tiempo se termina y se relanza
@@ -171,6 +174,19 @@ def resumen_pendiente(ruta_dia: Path, ahora: float) -> bool:
     return ultimo is not None
 
 
+def es_cierre_semanal(ahora: float) -> bool:
+    """True durante el sábado de la hora de los modelos: el día que empieza con el cierre del viernes en Nueva York."""
+    return (dia_de_los_modelos(ahora) + 3) % 7 == 5  # 1970-01-01 fue jueves; lunes = 0
+
+
+def lanzar_informe(dias: int = 7) -> subprocess.Popen:
+    """Arranca informe.py --telegram en su propio proceso: es él quien se conecta a MT5, no el vigilante."""
+    orden = [str(Path(sys.executable).with_name("python.exe")), str(config.BASE_DIR / "informe.py"), "--dias", str(dias), "--telegram"]
+    with open(LOGS / "informe.txt", "w", encoding="utf-8") as salida:
+        return subprocess.Popen(orden, cwd=config.BASE_DIR, stdin=subprocess.DEVNULL, stdout=salida, stderr=subprocess.STDOUT,
+                                creationflags=CREATE_NO_WINDOW, env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+
+
 def _cuantas(n: int, singular: str) -> str:
     return f"{n} {singular}" if n == 1 else f"{n} {singular}s"
 
@@ -258,7 +274,7 @@ def detener_bots(activos: dict, ruta: Path, cual: str, ahora: float) -> str:
     return f"Orden de detener enviada a {', '.join(elegidos)}. Sus posiciones abiertas conservan el stop y el objetivo"
 
 
-def atender(texto: str, activos: dict, ruta: Path, ahora: float) -> str:
+def atender(texto: str, activos: dict, ruta: Path, ahora: float, informe=None) -> str:
     """La respuesta a un mensaje del chat."""
     orden, _, resto = texto.strip().partition(" ")
     orden = orden.lower().partition("@")[0]  # en un grupo, Telegram añade @nombre_del_bot
@@ -268,6 +284,9 @@ def atender(texto: str, activos: dict, ruta: Path, ahora: float) -> str:
         return texto_resumen(activos, leer_deseados(ruta), ahora) or "Sin bots apuntados ni operaciones en las últimas 24 horas"
     if orden == "/detener":
         return detener_bots(activos, ruta, resto, ahora)
+    if orden == "/informe" and informe is not None:
+        informe()  # lo envía informe.py desde su propio proceso
+        return "Preparando el informe de los últimos 7 días; llega en unos segundos"
     return AYUDA
 
 
@@ -389,7 +408,7 @@ def main() -> None:
     token, chat = alertas.credenciales()
     if token is not None:
         threading.Thread(target=escuchar_telegram, daemon=True, name="consultas-telegram",
-                         args=(token, chat, lambda texto: atender(texto, ACTIVOS, RUTA, time.time()))).start()
+                         args=(token, chat, lambda texto: atender(texto, ACTIVOS, RUTA, time.time(), lanzar_informe))).start()
     latido = RUTA.with_name("vigilante.txt")  # la ventana muestra si el vigilante está en marcha
     try:
         with riesgo_cuenta.turno(RUTA.with_name("vigilante.lock"), espera_s=0):
@@ -402,6 +421,8 @@ def main() -> None:
                         resumen = texto_resumen(ACTIVOS, leer_deseados(RUTA), time.time())
                         if resumen:
                             avisar(resumen)
+                        if es_cierre_semanal(time.time()) and avisos is not None:
+                            lanzar_informe()
                     latido.write_text(str(int(time.time())), encoding="utf-8")
                 except Exception:
                     log.exception("Error al revisar los bots; se reintenta")

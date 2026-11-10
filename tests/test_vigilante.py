@@ -374,3 +374,26 @@ def test_la_escucha_ignora_lo_anterior_al_arranque_y_sobrevive_a_los_fallos():
     assert [p["offset"] for m, p in llamadas[1:] if m == "getUpdates"] == [8, 8, 9, 10]
     enviados = [p["text"] for m, p in llamadas if m == "sendMessage"]
     assert enviados == ["todo bien", "No se pudo atender la consulta (RuntimeError)"]
+
+
+def test_el_informe_semanal_toca_al_cierre_del_viernes():
+    viernes_cierre = 1794607200  # 2026-11-13 22:00 UTC = 17:00 en Nueva York
+    assert not vg.es_cierre_semanal(viernes_cierre - 60) and vg.es_cierre_semanal(viernes_cierre + 60)
+    assert not vg.es_cierre_semanal(viernes_cierre + 86400 + 60)  # el sábado a esa hora ya es domingo para los modelos
+    assert not vg.es_cierre_semanal(1794261600 + 60)  # un lunes
+
+
+def test_el_informe_se_lanza_en_su_propio_proceso(monkeypatch, tmp_path):
+    lanzado = Mock()
+    monkeypatch.setattr(vg, "LOGS", tmp_path)
+    monkeypatch.setattr(vg.subprocess, "Popen", lanzado)
+    vg.lanzar_informe()
+    orden = lanzado.call_args.args[0]
+    assert orden[1].endswith("informe.py") and orden[2:] == ["--dias", "7", "--telegram"]
+
+
+def test_informe_por_telegram_lanza_el_proceso_del_informe(tmp_path):
+    lanzar = Mock()
+    respuesta = vg.atender("/informe", {}, tmp_path / "vigilante.json", AHORA, lanzar)
+    lanzar.assert_called_once_with()
+    assert "Preparando el informe" in respuesta and "/informe" in vg.AYUDA

@@ -264,12 +264,15 @@ El mismo archivo alimenta dos variantes del banco de experimentos: `noticias_fil
 
 **Resumen diario:** al cierre de Nueva York (00:00 en hora de los modelos) el vigilante envía por Telegram el estado de cada bot apuntado y, de las últimas 24 horas, sus entradas, cierres y resultado neto, leídos de los `operaciones.csv`. La última línea da el balance, la equity y el flotante de la cuenta: cada bot los publica con su latido (cada 5 s) y el vigilante toma los más recientes, sin conectarse a MT5; si ningún bot los publicó en la última hora, esa línea no sale. Si el vigilante no estaba en marcha a esa hora, lo envía al arrancar.
 
+**Informe de rendimiento** (`python informe.py [--dias 7 | --todo] [--telegram]`): de las operaciones cerradas en el periodo, el total y los desgloses por activo, lado, salida y sesión (hora UTC de la entrada), con número de trades, acierto, resultado neto, esperanza en R, profit factor y, en el total, drawdown y `t`. R es el resultado de cada operación entre lo que perdía si tocaba su stop (`order_calc_profit` con el stop de la orden de entrada). Junto a cada activo va la esperanza de su backtest: la media de las semillas de la variante base en `experimentos/registro.csv`. Lee el historial de MT5 y no envía órdenes. Al cierre de cada viernes, si Telegram está configurado, el vigilante lo lanza con `--telegram` en un proceso aparte (el vigilante sigue sin conectarse a MT5); su salida queda en `logs/exness/informe.txt`. Con menos de 30 trades avisa de que el resultado es orientativo.
+
 **Consultas por Telegram:** con Telegram configurado, el vigilante responde a los mensajes que le llegan desde el chat de `TELEGRAM_CHAT_ID` (los de cualquier otro chat se ignoran):
 
 | Mensaje | Respuesta |
 |---|---|
 | `/estado` | Cada bot apuntado o en marcha, con lo último que dijo, y el balance, la equity y el flotante de la cuenta |
 | `/resumen` | El resumen de las últimas 24 horas, el mismo que se envía al cierre |
+| `/informe` | El informe de rendimiento de los últimos 7 días (lo prepara `informe.py` y llega en unos segundos) |
 | `/detener SIMBOLO` o `/detener todos` | Lo mismo que el botón Detener de la ventana: el bot deja de vigilarse y termina; sus posiciones conservan el stop y el objetivo |
 
 No hay orden para iniciar bots ni para cerrar posiciones. Los mensajes escritos mientras el vigilante estaba parado no se atienden al arrancar. Mientras el vigilante escucha, `python alertas.py --chat` puede fallar: Telegram solo admite un lector a la vez.
