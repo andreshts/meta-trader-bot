@@ -40,7 +40,7 @@ def test_el_comando_normaliza_y_lleva_todos_los_ajustes(activo):
     argumentos = dict(zip(orden[2::2], orden[3::2]))
     assert argumentos == {"--simbolo": "XAUUSDm", "--horas": "5", "--volumen": "0.02", "--max-spread": "700",
                           "--umbral-long": "0.31", "--umbral-short": "0.29", "--perdida-diaria": "2", "--drawdown": "10",
-                          "--riesgo-abierto": "2.5", "--max-posiciones": "3"}
+                          "--riesgo-abierto": "2.5", "--max-posiciones": "3", "--sin-entradas": "23:30-01:15"}
 
 
 def test_lo_que_arma_la_ventana_lo_acepta_el_lanzador(activo, monkeypatch):
@@ -56,6 +56,24 @@ def test_un_tope_de_cuenta_vacio_no_se_pasa_al_lanzador(activo):
     assert "--max-posiciones" not in pc.comando(activo, AJUSTES, {"horas": "5", "perdida_diaria": "2", "drawdown": "10"})
 
 
+def test_con_riesgo_por_operacion_el_lote_lo_calcula_el_bot(activo, monkeypatch):
+    orden = pc.comando(activo, {**AJUSTES, "lote": "no se usa"}, {**COMUNES, "riesgo": "0,5"})
+    assert "--volumen" not in orden and orden[orden.index("--riesgo") + 1] == "0.5"
+    monkeypatch.setattr("sys.argv", ["x", *orden[2:]])
+    args = demo_exness_bot.leer_argumentos()
+    assert (args.riesgo, args.volumen) == (0.005, None)
+
+
+def test_la_franja_sin_entradas_llega_al_lanzador(activo, monkeypatch):
+    orden = pc.comando(activo, AJUSTES, {**COMUNES, "sin_entradas": " 22:45 - 02:00 "})
+    assert orden[orden.index("--sin-entradas") + 1] == "22:45-02:00"
+    monkeypatch.setattr("sys.argv", ["x", *orden[2:]])
+    assert demo_exness_bot.leer_argumentos().sin_entradas == ("22:45", "02:00")
+    vacia = pc.comando(activo, AJUSTES, {**COMUNES, "sin_entradas": "  "})
+    monkeypatch.setattr("sys.argv", ["x", *vacia[2:]])
+    assert demo_exness_bot.leer_argumentos().sin_entradas is None
+
+
 def test_un_umbral_vacio_apaga_ese_lado(activo):
     orden = pc.comando(activo, {**AJUSTES, "umbral_short": "  "}, COMUNES)
     assert orden[orden.index("--umbral-short") + 1] == "off"
@@ -67,6 +85,7 @@ def test_un_umbral_vacio_apaga_ese_lado(activo):
     ({"umbral_long": "", "umbral_short": ""}, {}, "al menos un umbral"),
     ({}, {"horas": "0"}, "duración"), ({}, {"perdida_diaria": "200"}, "pérdida"), ({}, {"drawdown": ""}, "drawdown"),
     ({}, {"max_posiciones": "2.5"}, "entero"), ({}, {"max_posiciones": "0"}, "posiciones"), ({}, {"riesgo_abierto": "x"}, "riesgo abierto"),
+    ({}, {"riesgo": "0"}, "riesgo por operación"), ({}, {"sin_entradas": "23:30"}, "franja"), ({}, {"sin_entradas": "25:00-01:00"}, "franja"),
 ])
 def test_los_ajustes_no_validos_se_explican(activo, cambios, comunes, mensaje):
     with pytest.raises(ValueError, match=mensaje):

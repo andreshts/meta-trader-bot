@@ -16,7 +16,7 @@ from pathlib import Path
 from tkinter import messagebox, ttk
 
 import config
-from activos import ACTIVOS, EURUSD, LOGS, Activo
+from activos import ACTIVOS, EURUSD, LOGS, Activo, segundos_del_dia
 from cuenta import CUENTA
 from operaciones import Instantanea, Operacion, leer_activos
 from panel_mt5 import SIN_LIMITE
@@ -37,7 +37,9 @@ COLUMNAS_VISTA = (("apertura", "Apertura", 115, "w"), ("tipo", "Tipo", 60, "w"),
                   ("cierre", "Cierre", 115, "w"), ("salida", "Salida / actual", 95, "e"), ("estado", "Estado", 90, "w"),
                   ("resultado", "Resultado", 80, "e"))
 COMUNES_INICIALES = {"horas": "5", "perdida_diaria": f"{config.MAX_PERDIDA_DIARIA_PCT * 100:g}",
-                     "drawdown": f"{config.MAX_DRAWDOWN_PCT * 100:g}", "riesgo_abierto": "2", "max_posiciones": "3"}
+                     "drawdown": f"{config.MAX_DRAWDOWN_PCT * 100:g}", "riesgo_abierto": "2", "max_posiciones": "3",
+                     "riesgo": "", "sin_entradas": "-".join(EURUSD.sin_entradas)}
+ANCHOS = {"sin_entradas": 12}  # los demás campos comunes son números cortos
 
 
 def numero(texto: str) -> float:
@@ -77,6 +79,25 @@ def _tope(comunes: dict, clave: str, opcion: str, nombre: str, minimo: float, ma
     return [opcion, valor]
 
 
+def _franja(texto: str) -> str:
+    """`HH:MM-HH:MM` sin espacios, u `off` si el campo está vacío: sin franja."""
+    texto = "".join(texto.split())
+    if not texto:
+        return "off"
+    inicio, _, fin = texto.partition("-")
+    try:
+        segundos_del_dia(inicio), segundos_del_dia(fin)
+    except ValueError:
+        raise ValueError(f"La franja sin entradas: «{texto}» no es HH:MM-HH:MM") from None
+    return texto
+
+
+def _lote(activo: Activo, ajustes: dict, comunes: dict) -> list[str]:
+    """Con un riesgo por operación, el lote lo calcula el bot y el de la fila no se usa."""
+    riesgo = _tope(comunes, "riesgo", "--riesgo", "El riesgo por operación", 0.01, 100)
+    return riesgo or ["--volumen", _en_rango(ajustes["lote"], "El lote", activo.lote_min, config.MAX_LOTES)]
+
+
 def comando(activo: Activo, ajustes: dict, comunes: dict) -> list[str]:
     """Línea de órdenes de demo_exness_bot.py para estos ajustes; ValueError con un mensaje si alguno no vale."""
     umbral_long, umbral_short = _umbral(ajustes["umbral_long"], "El umbral de compra"), _umbral(ajustes["umbral_short"], "El umbral de venta")
@@ -86,7 +107,7 @@ def comando(activo: Activo, ajustes: dict, comunes: dict) -> list[str]:
         str(Path(sys.executable).with_name("python.exe")), str(LANZADOR),
         "--simbolo", activo.simbolo,
         *_tope(comunes, "horas", "--horas", "La duración", 0.01, MAX_HORAS),  # vacía: hasta que se detenga
-        "--volumen", _en_rango(ajustes["lote"], "El lote", activo.lote_min, config.MAX_LOTES),
+        *_lote(activo, ajustes, comunes),
         "--max-spread", _en_rango(ajustes["max_spread"], "El spread máximo", 1, 1_000_000),
         "--umbral-long", umbral_long,
         "--umbral-short", umbral_short,
@@ -94,6 +115,7 @@ def comando(activo: Activo, ajustes: dict, comunes: dict) -> list[str]:
         "--drawdown", _en_rango(comunes["drawdown"], "El drawdown", 0.01, 100),
         *_tope(comunes, "riesgo_abierto", "--riesgo-abierto", "El riesgo abierto", 0.01, 100),
         *_tope(comunes, "max_posiciones", "--max-posiciones", "El máximo de posiciones", 1, 100, entero=True),
+        "--sin-entradas", _franja(comunes.get("sin_entradas", COMUNES_INICIALES["sin_entradas"])),
     ]
 
 
@@ -259,18 +281,24 @@ class Ventana:
         abajo.grid(sticky="ew", pady=(12, 8))
         abajo.columnconfigure(6, weight=1)
         campos = ((("Duración (horas)", "horas"), ("Pérdida diaria máx. (%)", "perdida_diaria"), ("Drawdown máx. (%)", "drawdown")),
-                  (("Riesgo abierto máx. (%)", "riesgo_abierto"), ("Posiciones máx.", "max_posiciones")))
+                  (("Riesgo abierto máx. (%)", "riesgo_abierto"), ("Posiciones máx.", "max_posiciones"),
+                   ("Riesgo por operación (%)", "riesgo")),
+                  (("Sin entradas (HH:MM-HH:MM)", "sin_entradas"),))
         for fila, linea in enumerate(campos):
             for columna, (texto, clave) in enumerate(linea):
                 ttk.Label(abajo, text=texto).grid(row=fila, column=2 * columna, padx=(0 if columna == 0 else 14, 4), pady=2, sticky="e")
-                ttk.Entry(abajo, textvariable=self.comunes[clave], width=6, justify="right").grid(row=fila, column=2 * columna + 1)
+                ttk.Entry(abajo, textvariable=self.comunes[clave], width=ANCHOS.get(clave, 6), justify="right").grid(
+                    row=fila, column=2 * columna + 1, columnspan=3 if clave in ANCHOS else 1, sticky="w")
         ttk.Button(abajo, text="Iniciar marcados", command=self.iniciar).grid(row=0, column=7, padx=(14, 6))
         ttk.Button(abajo, text="Detener todos", command=self.detener_todos).grid(row=0, column=8)
 
         ttk.Label(marco, foreground=GRIS, text="Deja un umbral vacío para no operar ese lado. Cerrar esta ventana no detiene los "
                                                "bots.\nAl detener un bot, sus posiciones abiertas conservan el stop y el objetivo.\n"
                                                "El riesgo abierto y las posiciones máximas cuentan todos los activos de la cuenta; "
-                                               "vacíos, no se aplican.\nCon la duración vacía, el bot corre hasta que lo detengas.",
+                                               "vacíos, no se aplican.\nCon la duración vacía, el bot corre hasta que lo detengas.\n"
+                                               "Con un riesgo por operación, el bot calcula el lote de cada entrada y el de la "
+                                               "tabla no se usa.\nLa franja sin entradas va en hora de los modelos (el cierre de "
+                                               "Nueva York es a las 00:00); vacía, se entra a cualquier hora.",
                   justify="left").grid(sticky="w")
         self.vigilante = ttk.Label(marco)
         self.vigilante.grid(sticky="w", pady=(6, 0))

@@ -1,5 +1,10 @@
 {
  "umbral_long": 0.34,
  "umbral_short": 0.31,
- "entrenado": "2026-11-09T15:25:26"
+ "entrenado": "2026-11-09T15:25:26",
+ "supuestos": {
+  "point": 0.01,
+  "spread_mediano": 120.0,
+  "slippage_puntos": 15.0
+ }
 }

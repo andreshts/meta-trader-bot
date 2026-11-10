@@ -1,8 +1,10 @@
 """Entrena un modelo por activo con velas de Exness, con el método de train_model.py, y lo guarda en models/exness/.
 
-Uso: python train_exness.py [SIMBOLO ...] [--comision 7]   (sin símbolos, todos)
+Uso: python train_exness.py [SIMBOLO ...] [--comision 7] [--supuestos]   (sin símbolos, todos)
 --comision es la comisión de ida y vuelta por lote, en la moneda de la cuenta: 0 en una cuenta Standard (la de la demo);
 en una Raw Spread o Zero, la que cobre Exness por ese instrumento.
+--supuestos no entrena: solo recalcula con las velas actuales lo que supone el backtest (medicion.py lo compara con la
+ejecución real) y lo añade al .json de cada modelo ya entrenado.
 Solo lee velas: no envía órdenes y puede ejecutarse con el bot en marcha.
 """
 import argparse
@@ -57,10 +59,16 @@ def comision_en_puntos(comision_por_lote: float, info) -> float:
     return comision_por_lote / valor_del_punto
 
 
+def supuestos(velas: pd.DataFrame, info) -> dict:
+    """Lo que el backtest da por hecho sobre la ejecución, en puntos; medicion.py lo compara con la real."""
+    mediana = float(velas["spread"].median())
+    return {"point": info.point, "spread_mediano": mediana, "slippage_puntos": mediana * DESLIZAMIENTO_SOBRE_MEDIANA}
+
+
 def entrenar_activo(activo: Activo, velas: pd.DataFrame, info, comision_por_lote: float = 0.0) -> dict:
     """El bundle listo para el bot, con los umbrales iniciales fijados por frecuencia sobre las velas más recientes."""
     velas = velas.assign(time=hora_modelo(velas["time"]))
-    mediana = float(velas["spread"].median())
+    mediana = supuestos(velas, info)["spread_mediano"]
     config.SYMBOL = activo.simbolo
     config.MAX_SPREAD_PUNTOS = mediana * FILTRO_SPREAD_SOBRE_MEDIANA
     config.SLIPPAGE_PUNTOS = mediana * DESLIZAMIENTO_SOBRE_MEDIANA
@@ -77,17 +85,26 @@ def entrenar_activo(activo: Activo, velas: pd.DataFrame, info, comision_por_lote
     return bundle
 
 
-def guardar(activo: Activo, bundle: dict) -> None:
+def guardar(activo: Activo, bundle: dict, supuestos: dict) -> None:
     activo.modelo.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(bundle, activo.modelo)
     resumen = {clave: bundle[clave] for clave in ("umbral_long", "umbral_short", "entrenado")}
+    resumen["supuestos"] = supuestos
     activo.modelo.with_suffix(".json").write_text(json.dumps(resumen, indent=1), encoding="utf-8")  # para la ventana
+
+
+def guardar_supuestos(activo: Activo, supuestos: dict) -> None:
+    """Añade los supuestos al .json de un modelo ya entrenado, sin tocar lo demás."""
+    ruta = activo.modelo.with_suffix(".json")
+    resumen = json.loads(ruta.read_text(encoding="utf-8"))
+    ruta.write_text(json.dumps({**resumen, "supuestos": supuestos}, indent=1), encoding="utf-8")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("simbolos", nargs="*", help=f"entre: {', '.join(ENTRENABLES)}")
     parser.add_argument("--comision", type=float, default=0.0, help="comisión de ida y vuelta por lote, en la moneda de la cuenta")
+    parser.add_argument("--supuestos", action="store_true", help="no entrena: solo guarda los supuestos del backtest")
     args = parser.parse_args()
     simbolos = args.simbolos or ENTRENABLES
     if not 0 <= args.comision < float("inf"):
@@ -106,8 +123,12 @@ def main() -> None:
     for simbolo, (velas, info) in descargas.items():
         print(f"\n=== {simbolo}: {len(velas)} velas", flush=True)
         activo = ACTIVOS[simbolo]
+        if args.supuestos:
+            guardar_supuestos(activo, supuestos(velas, info))
+            print(f"Supuestos guardados en {activo.modelo.with_suffix('.json')}", flush=True)
+            continue
         bundle = entrenar_activo(activo, velas, info, args.comision)
-        guardar(activo, bundle)
+        guardar(activo, bundle, supuestos(velas, info))
         print(f"Guardado {activo.modelo}: umbral compra {bundle['umbral_long']}, venta {bundle['umbral_short']}", flush=True)
 
 

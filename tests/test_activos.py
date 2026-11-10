@@ -50,3 +50,18 @@ def test_la_comision_por_lote_se_pasa_a_puntos():
 
 def test_todos_los_activos_se_entrenan_con_velas_de_exness():
     assert train_exness.ENTRENABLES == list(activos.ACTIVOS)
+
+
+def test_los_supuestos_del_backtest_se_guardan_junto_al_modelo(tmp_path):
+    import json
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    velas, info = pd.DataFrame({"spread": [100, 112, 120]}), SimpleNamespace(point=0.01)
+    supuestos = train_exness.supuestos(velas, info)
+    assert supuestos == {"point": 0.01, "spread_mediano": 112.0, "slippage_puntos": 14.0}
+    activo = SimpleNamespace(modelo=tmp_path / "X.pkl")
+    activo.modelo.with_suffix(".json").write_text(json.dumps({"umbral_long": 0.3}), encoding="utf-8")
+    train_exness.guardar_supuestos(activo, supuestos)
+    assert json.loads(activo.modelo.with_suffix(".json").read_text(encoding="utf-8")) == {"umbral_long": 0.3, "supuestos": supuestos}
