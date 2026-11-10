@@ -27,8 +27,9 @@ def test_mide_entradas_y_salidas_en_contra():
 def test_las_ordenes_no_ejecutadas_y_los_cierres_por_tiempo_van_aparte():
     rechazada = {**APERTURA, "ticket": "", "precio": "", "slippage_puntos": "", "retcode": "10016"}
     tiempo = {**APERTURA, "evento": "Cierre por time stop (ticket 7)", "tipo": "SELL", "slippage_puntos": "4.0"}
-    m = medicion.medir([rechazada, APERTURA, tiempo, cierre(comentario="time stop")], point=0.01)
-    assert (m.no_ejecutadas, m.entradas, m.por_tiempo, m.stops) == (1, [25.0], [4.0], [])
+    limite = {**tiempo, "evento": "Cierre por limite (ticket 7)", "slippage_puntos": "6.0"}
+    m = medicion.medir([rechazada, APERTURA, tiempo, limite, cierre(comentario="time stop")], point=0.01)
+    assert (m.no_ejecutadas, m.entradas, m.a_mercado, m.stops) == (1, [25.0], [4.0, 6.0], [])
 
 
 def test_sin_el_punto_no_se_miden_stops_y_desde_filtra_por_fecha():

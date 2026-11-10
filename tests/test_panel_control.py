@@ -347,3 +347,14 @@ def test_la_ventana_dice_si_el_vigilante_esta_en_marcha(tmp_path):
     latido.write_text(str(AHORA - 15))
     assert "en marcha" in pc.texto_vigilante(latido, AHORA)[0]
     assert "parado" in pc.texto_vigilante(latido, AHORA + 300)[0]
+
+
+def test_el_cierre_al_limite_solo_se_pide_si_esta_marcado(activo, monkeypatch):
+    assert "--cerrar-al-limite" not in pc.comando(activo, AJUSTES, {**COMUNES, "cerrar_al_limite": ""})
+    orden = pc.comando(activo, AJUSTES, {**COMUNES, "cerrar_al_limite": "1"})
+    assert orden[-1] == "--cerrar-al-limite"
+    monkeypatch.setattr("sys.argv", ["x", *orden[2:]])
+    args = demo_exness_bot.leer_argumentos()
+    assert args.cerrar_al_limite and args.sin_entradas == ("23:30", "01:15")
+    monkeypatch.setattr("sys.argv", ["x", *pc.comando(activo, AJUSTES, COMUNES)[2:]])
+    assert not demo_exness_bot.leer_argumentos().cerrar_al_limite

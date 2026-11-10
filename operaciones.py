@@ -7,7 +7,7 @@ import MetaTrader5 as mt5
 
 from activos import Activo
 from cuenta import CUENTA
-from trading_bot import importe_deal
+from trading_bot import CIERRE_POR_LIMITE, importe_deal
 
 LOGIN, TERMINAL = CUENTA.login, CUENTA.terminal
 
@@ -43,6 +43,8 @@ class Instantanea:
 def _motivo(salida) -> str:
     if "time stop" in salida.comment:
         return "Por tiempo"
+    if CIERRE_POR_LIMITE in salida.comment:
+        return "Por límite"
     return MOTIVOS.get(salida.reason, "Bot")
 
 

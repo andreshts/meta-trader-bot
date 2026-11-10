@@ -893,3 +893,47 @@ def test_se_puede_desactivar_el_ajuste(mt5, bundle, monkeypatch):
     mt5.deslizamiento = 0.00030
     tb.ciclo(bundle, nuevo_estado(mt5))
     assert mt5.modificaciones == []
+
+
+# ---------------- cierre de emergencia (CERRAR_AL_LIMITE) ----------------
+def _en_drawdown(mt5):
+    estado = nuevo_estado(mt5)
+    tb.actualizar_equity_max(estado, 12_000.0)
+    mt5.cuenta.equity = 10_000.0  # -16.7% desde el máximo
+    return estado
+
+
+def test_sin_la_opcion_un_limite_no_cierra_la_posicion(mt5, bundle):
+    estado = _en_drawdown(mt5)
+    mt5.abrir_posicion()
+    tb.ciclo(bundle, estado)
+    assert cierres(mt5) == [] and len(mt5.posiciones) == 1
+
+
+def test_con_la_opcion_el_drawdown_cierra_la_posicion_y_queda_registrado(mt5, bundle, monkeypatch):
+    monkeypatch.setattr(config, "CERRAR_AL_LIMITE", True)
+    estado = _en_drawdown(mt5)
+    mt5.abrir_posicion()
+    tb.ciclo(bundle, estado)
+    assert len(cierres(mt5)) == 1 and mt5.posiciones == []
+    assert cierres(mt5)[0]["comment"] == "rf_mt5 limite"
+    with open(config.OPERACIONES_PATH, encoding="utf-8") as f:
+        assert any(fila["evento"].startswith("Cierre por limite") for fila in csv.DictReader(f))
+    mt5.avanzar_vela(1)
+    tb.ciclo(bundle, estado)
+    assert aperturas(mt5) == []  # el límite sigue impidiendo entradas
+
+
+def test_con_la_opcion_la_perdida_diaria_cierra_la_posicion(mt5, bundle, monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(config, "CERRAR_AL_LIMITE", True)
+    estado = nuevo_estado(mt5)
+    mt5.abrir_posicion()
+    tb.ciclo(bundle, estado)
+    assert cierres(mt5) == []  # dentro de los límites, la posición sigue
+    mt5.deals.append(SimpleNamespace(ticket=991, position_id=991, entry=tb.mt5.DEAL_ENTRY_OUT, magic=config.MAGIC_NUMBER,
+                                     symbol=config.SYMBOL, time=mt5.tick.time - 1, volume=1.0, price=1.1,
+                                     profit=-250.0, swap=0.0, commission=0.0, fee=0.0, comment=""))
+    mt5.cuenta.balance = mt5.cuenta.equity = 9_750.0
+    tb.ciclo(bundle, estado)  # se cierra en la misma vuelta en que se alcanza el límite, sin esperar a la vela
+    assert len(cierres(mt5)) == 1 and mt5.posiciones == []

@@ -201,6 +201,8 @@ def leer_argumentos() -> argparse.Namespace:
                         help="franja sin entradas HH:MM-HH:MM, en hora de los modelos (cierre de Nueva York = 00:00), u off")
     parser.add_argument("--perdida-diaria", type=porcentaje, help="pérdida máxima del día, en %% del balance")
     parser.add_argument("--drawdown", type=porcentaje, help="caída máxima desde el máximo de equity, en %%")
+    parser.add_argument("--cerrar-al-limite", action="store_true",
+                        help="al alcanzar la pérdida diaria o el drawdown, cierra además la posición abierta del activo")
     parser.add_argument("--riesgo-abierto", type=porcentaje,
                         help="pérdida máxima, en %% de la equity, si todas las posiciones de la cuenta tocan su stop")
     parser.add_argument("--max-posiciones", type=entero_positivo, help="posiciones abiertas a la vez entre todos los activos")
@@ -218,6 +220,7 @@ def configurar_activo(activo: Activo, args: argparse.Namespace) -> None:
     config.DESVIACION_SLIPPAGE = max(1, round(config.DESVIACION_SLIPPAGE * activo.max_spread / EURUSD.max_spread))
     config.MAX_PERDIDA_DIARIA_PCT = args.perdida_diaria or config.MAX_PERDIDA_DIARIA_PCT
     config.MAX_DRAWDOWN_PCT = args.drawdown or config.MAX_DRAWDOWN_PCT
+    config.CERRAR_AL_LIMITE = args.cerrar_al_limite
     config.MT5_PATH = CUENTA.terminal
     config.EXIGIR_VENTAJA_SIGNIFICATIVA = CUENTA.exigir_ventaja
     config.PERMITIR_CUENTA_REAL = CUENTA.real

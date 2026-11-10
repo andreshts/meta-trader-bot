@@ -38,7 +38,7 @@ COLUMNAS_VISTA = (("apertura", "Apertura", 115, "w"), ("tipo", "Tipo", 60, "w"),
                   ("resultado", "Resultado", 80, "e"))
 COMUNES_INICIALES = {"horas": "5", "perdida_diaria": f"{config.MAX_PERDIDA_DIARIA_PCT * 100:g}",
                      "drawdown": f"{config.MAX_DRAWDOWN_PCT * 100:g}", "riesgo_abierto": "2", "max_posiciones": "3",
-                     "riesgo": "", "sin_entradas": "-".join(EURUSD.sin_entradas)}
+                     "riesgo": "", "sin_entradas": "-".join(EURUSD.sin_entradas), "cerrar_al_limite": ""}
 ANCHOS = {"sin_entradas": 12}  # los demás campos comunes son números cortos
 
 
@@ -116,6 +116,7 @@ def comando(activo: Activo, ajustes: dict, comunes: dict) -> list[str]:
         *_tope(comunes, "riesgo_abierto", "--riesgo-abierto", "El riesgo abierto", 0.01, 100),
         *_tope(comunes, "max_posiciones", "--max-posiciones", "El máximo de posiciones", 1, 100, entero=True),
         "--sin-entradas", _franja(comunes.get("sin_entradas", COMUNES_INICIALES["sin_entradas"])),
+        *(["--cerrar-al-limite"] if comunes.get("cerrar_al_limite") else []),  # sin valor: va al final
     ]
 
 
@@ -289,6 +290,8 @@ class Ventana:
                 ttk.Label(abajo, text=texto).grid(row=fila, column=2 * columna, padx=(0 if columna == 0 else 14, 4), pady=2, sticky="e")
                 ttk.Entry(abajo, textvariable=self.comunes[clave], width=ANCHOS.get(clave, 6), justify="right").grid(
                     row=fila, column=2 * columna + 1, columnspan=3 if clave in ANCHOS else 1, sticky="w")
+        ttk.Checkbutton(abajo, text="Cerrar las posiciones al alcanzar la pérdida diaria o el drawdown", onvalue="1", offvalue="",
+                        variable=self.comunes["cerrar_al_limite"]).grid(row=len(campos), column=0, columnspan=7, sticky="w", pady=(4, 0))
         ttk.Button(abajo, text="Iniciar marcados", command=self.iniciar).grid(row=0, column=7, padx=(14, 6))
         ttk.Button(abajo, text="Detener todos", command=self.detener_todos).grid(row=0, column=8)
 
@@ -298,7 +301,8 @@ class Ventana:
                                                "vacíos, no se aplican.\nCon la duración vacía, el bot corre hasta que lo detengas.\n"
                                                "Con un riesgo por operación, el bot calcula el lote de cada entrada y el de la "
                                                "tabla no se usa.\nLa franja sin entradas va en hora de los modelos (el cierre de "
-                                               "Nueva York es a las 00:00); vacía, se entra a cualquier hora.",
+                                               "Nueva York es a las 00:00); vacía, se entra a cualquier hora.\n"
+                                               "Sin marcar el cierre al límite, los límites solo impiden entradas nuevas.",
                   justify="left").grid(sticky="w")
         self.vigilante = ttk.Label(marco)
         self.vigilante.grid(sticky="w", pady=(6, 0))

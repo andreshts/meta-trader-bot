@@ -43,7 +43,7 @@ def test_una_operacion_cerrada_une_entrada_salida_y_niveles():
 
 @pytest.mark.parametrize("razon,comentario,motivo", [
     (real.DEAL_REASON_SL, "", "Stop loss"), (real.DEAL_REASON_TP, "", "Take profit"),
-    (real.DEAL_REASON_EXPERT, "rf_mt5 time stop", "Por tiempo"), (real.DEAL_REASON_CLIENT, "", "Manual"),
+    (real.DEAL_REASON_EXPERT, "rf_mt5 time stop", "Por tiempo"), (real.DEAL_REASON_EXPERT, "rf_mt5 limite", "Por límite"), (real.DEAL_REASON_CLIENT, "", "Manual"),
 ])
 def test_motivo_de_cierre(razon, comentario, motivo):
     [o] = op.reconstruir([entrada(), salida(razon=razon, comentario=comentario)], [], [], ORO)

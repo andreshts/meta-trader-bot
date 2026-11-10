@@ -20,7 +20,7 @@ EJECUTADA = {"10009", "10010"}  # TRADE_RETCODE_DONE y DONE_PARTIAL
 NIVEL = re.compile(r"\[(sl|tp) ([\d.]+)\]")  # comentario que MT5 pone al deal de un cierre por stop u objetivo
 POCAS = 30  # con menos ejecuciones, la media todavía se mueve mucho
 FILAS = (("entradas", "Entrada"), ("stops", "Salida por stop"), ("objetivos", "Salida por objetivo"),
-         ("por_tiempo", "Cierre por tiempo"))
+         ("a_mercado", "Cierre a mercado"))  # los que envía el bot: por tiempo o por límite
 
 
 @dataclass
@@ -28,7 +28,7 @@ class Medicion:
     entradas: list = field(default_factory=list)  # deslizamiento de cada ejecución, en puntos
     stops: list = field(default_factory=list)
     objetivos: list = field(default_factory=list)
-    por_tiempo: list = field(default_factory=list)
+    a_mercado: list = field(default_factory=list)
     spreads: list = field(default_factory=list)  # spread al enviar cada entrada ejecutada
     no_ejecutadas: int = 0
     cerradas: set = field(default_factory=set)
@@ -51,7 +51,7 @@ def medir(filas, point: float | None = None, desde: str = "") -> Medicion:
             continue
         evento, ticket, precio = fila.get("evento") or "", fila.get("ticket"), _numero(fila.get("precio"))
         desliz = _numero(fila.get("slippage_puntos"))
-        if evento.startswith(("Apertura", "Cierre por time stop")):
+        if evento.startswith(("Apertura", "Cierre por ")):
             if fila.get("retcode") not in EJECUTADA or desliz is None:
                 m.no_ejecutadas += 1
             elif evento.startswith("Apertura"):
@@ -60,7 +60,7 @@ def medir(filas, point: float | None = None, desde: str = "") -> Medicion:
                 if (spread := _numero(fila.get("spread_puntos"))) is not None:
                     m.spreads.append(spread)
             else:
-                m.por_tiempo.append(desliz)
+                m.a_mercado.append(desliz)
         elif evento in ("entrada", "cierre"):
             m.resultado += sum(_numero(fila.get(c)) or 0.0 for c in ("beneficio", "swap", "comision", "tasas"))
             if evento == "entrada":
@@ -120,7 +120,7 @@ def informe(activo: Activo, m: Medicion, supuestos: dict) -> str:
     lineas.append(_linea("Spread al entrar", m.spreads))
     if "point" not in supuestos:
         lineas.append("  Sin el tamaño del punto guardado, no se mide el deslizamiento de stops ni objetivos")
-    ejecuciones = len(m.entradas) + len(m.stops) + len(m.objetivos) + len(m.por_tiempo)
+    ejecuciones = len(m.entradas) + len(m.stops) + len(m.objetivos) + len(m.a_mercado)
     if 0 < ejecuciones < POCAS:
         lineas.append(f"  {ejecuciones} ejecuciones medidas: orientativo hasta llegar a {POCAS}")
     lineas.append(f"  Órdenes no ejecutadas: {m.no_ejecutadas} · resultado neto registrado: {m.resultado:+.2f}")

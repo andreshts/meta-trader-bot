@@ -30,6 +30,7 @@ RETCODES_INCIERTOS = {mt5.TRADE_RETCODE_PLACED, mt5.TRADE_RETCODE_TIMEOUT, mt5.T
 ESTADOS_ORDEN_EJECUTADA = {mt5.ORDER_STATE_FILLED, mt5.ORDER_STATE_PARTIAL}
 ESTADOS_ORDEN_DESCARTADA = {mt5.ORDER_STATE_CANCELED, mt5.ORDER_STATE_REJECTED, mt5.ORDER_STATE_EXPIRED}
 EJECUTADA, RECHAZADA, INCIERTA = "ejecutada", "rechazada", "incierta"  # resultados de enviar()
+CIERRE_POR_LIMITE = "limite"  # sin tilde: va también en el comentario de la orden
 CAMPOS_OPERACIONES = ["fecha", "evento", "ticket", "tipo", "volumen_pedido", "volumen", "precio_pedido", "precio",
                       "slippage_puntos", "spread_puntos", "sl", "tp", "retcode", "comentario",
                       "beneficio", "swap", "comision", "tasas"]
@@ -484,7 +485,7 @@ def resolver_pendiente(estado: dict) -> None:
     guardar_estado(estado)
 
 
-def cerrar(pos, info, login) -> None:
+def cerrar(pos, info, login, causa: str = "time stop") -> None:
     verificar_cuenta(login)
     tick = mt5.symbol_info_tick(config.SYMBOL)
     if pos.type == mt5.POSITION_TYPE_BUY:
@@ -500,24 +501,29 @@ def cerrar(pos, info, login) -> None:
         "price": precio,
         "deviation": config.DESVIACION_SLIPPAGE,
         "magic": config.MAGIC_NUMBER,
-        "comment": "rf_mt5 time stop",
+        "comment": f"rf_mt5 {causa}",
         "type_time": mt5.ORDER_TIME_GTC,
         "type_filling": modo_llenado(info),
-    }, f"Cierre por time stop (ticket {pos.ticket})",
+    }, f"Cierre por {causa} (ticket {pos.ticket})",
         confirmar=lambda: all(p.ticket != pos.ticket for p in posiciones_del_bot()))
 
 
-def gestionar_posicion(pos, info, estado: dict) -> None:
-    """Time stop. Se comprueba en cada vuelta del bucle; si un cierre falla se reintenta tras REINTENTO_CIERRE_S."""
-    if velas_en_trade(pos) < config.MAX_BARS_EN_TRADE:
-        return
-    if ordenes_activas_del_bot():
-        return  # un cierre anterior sigue colocado en el servidor: no se envía otro
+def gestionar_posicion(pos, info, estado: dict, cuenta=None) -> None:
+    """Time stop y, con CERRAR_AL_LIMITE, cierre al alcanzar el límite de drawdown o de pérdida diaria. Se
+    comprueba en cada vuelta del bucle; si un cierre falla se reintenta tras REINTENTO_CIERRE_S."""
     ahora = time.monotonic()
     if ahora - estado.get("ultimo_intento_cierre", -math.inf) < config.REINTENTO_CIERRE_S:
         return
+    causa = "time stop" if velas_en_trade(pos) >= config.MAX_BARS_EN_TRADE else None
+    if causa is None and config.CERRAR_AL_LIMITE:
+        limite = motivo_de_limite(estado, cuenta or mt5.account_info())
+        if limite:
+            log.warning("Límite alcanzado con una posición abierta (%s); se cierra", limite)
+            causa = CIERRE_POR_LIMITE
+    if causa is None or ordenes_activas_del_bot():  # un cierre anterior sigue colocado en el servidor: no se envía otro
+        return
     estado["ultimo_intento_cierre"] = ahora
-    cerrar(pos, info, estado["login"])
+    cerrar(pos, info, estado["login"], causa)
 
 
 def deals_del_bot() -> list:
@@ -685,6 +691,11 @@ def motivo_sin_entradas(estado: dict, cuenta):
         return "hay una orden del bot colocada en el servidor"
     if config.PAUSA_PATH.exists():
         return f"pausa manual (existe {config.PAUSA_PATH})"
+    return motivo_de_limite(estado, cuenta)
+
+
+def motivo_de_limite(estado: dict, cuenta):
+    """El límite de drawdown o de pérdida diaria que se alcanzó, o None."""
     drawdown = (estado["equity_max"] - cuenta.equity) / estado["equity_max"]
     if drawdown >= config.MAX_DRAWDOWN_PCT:
         if config.ESTADO_CUENTA_PATH is not None:
@@ -821,7 +832,7 @@ def ciclo(bundle: dict, estado: dict) -> None:
     info = mt5.symbol_info(config.SYMBOL)
     pos = posicion_abierta()
     if pos is not None:
-        gestionar_posicion(pos, info, estado)
+        gestionar_posicion(pos, info, estado, cuenta)
 
     bar_time = int(mt5_utils.descargar_velas(0, 1)["time"].iloc[0])
     if bar_time == estado["last_bar_time"]:
