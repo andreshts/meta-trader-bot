@@ -1,6 +1,8 @@
 """Entrena un modelo por activo con velas de Exness, con el método de train_model.py, y lo guarda en models/exness/.
 
-Uso: python train_exness.py [SIMBOLO ...]   (sin símbolos, todos salvo EUR/USD, que usa models/random_forest_mt5.pkl)
+Uso: python train_exness.py [SIMBOLO ...] [--comision 7]   (sin símbolos, todos)
+--comision es la comisión de ida y vuelta por lote, en la moneda de la cuenta: 0 en una cuenta Standard (la de la demo);
+en una Raw Spread o Zero, la que cobre Exness por ese instrumento.
 Solo lee velas: no envía órdenes y puede ejecutarse con el bot en marcha.
 """
 import argparse
@@ -17,11 +19,11 @@ import pandas as pd
 
 import config
 import train_model as tm
-from activos import ACTIVOS, EURUSD, Activo, hora_modelo
+from activos import ACTIVOS, Activo, hora_modelo
 from cuenta import CUENTA
 from features import FEATURES
 
-ENTRENABLES = [s for s in ACTIVOS if s != EURUSD.simbolo]
+ENTRENABLES = list(ACTIVOS)
 VELAS = 99_999  # el máximo que entrega la terminal con su límite de 100.000 barras
 SEÑALES_POR_SEMANA = 5  # frecuencia, por lado, con la que se fija el umbral inicial
 BELOW_NORMAL_PRIORITY = 0x4000
@@ -49,13 +51,20 @@ def umbral_por_frecuencia(proba: np.ndarray, semanas: float) -> float:
     return math.floor(float(np.quantile(proba, max(0.0, 1 - SEÑALES_POR_SEMANA * semanas / len(proba)))) * 100) / 100
 
 
-def entrenar_activo(activo: Activo, velas: pd.DataFrame, info) -> dict:
+def comision_en_puntos(comision_por_lote: float, info) -> float:
+    """Pasa una comisión por lote (moneda de la cuenta) a puntos de precio, que es como la descuenta el backtest."""
+    valor_del_punto = info.trade_tick_value / info.trade_tick_size * info.point  # de un lote
+    return comision_por_lote / valor_del_punto
+
+
+def entrenar_activo(activo: Activo, velas: pd.DataFrame, info, comision_por_lote: float = 0.0) -> dict:
     """El bundle listo para el bot, con los umbrales iniciales fijados por frecuencia sobre las velas más recientes."""
     velas = velas.assign(time=hora_modelo(velas["time"]))
     mediana = float(velas["spread"].median())
     config.SYMBOL = activo.simbolo
     config.MAX_SPREAD_PUNTOS = mediana * FILTRO_SPREAD_SOBRE_MEDIANA
     config.SLIPPAGE_PUNTOS = mediana * DESLIZAMIENTO_SOBRE_MEDIANA
+    config.COMISION_PUNTOS = comision_en_puntos(comision_por_lote, info)
     costes = tm.costes_de_simbolo(info)
 
     bundle = tm.entrenar(velas, info.point, costes)
@@ -78,7 +87,11 @@ def guardar(activo: Activo, bundle: dict) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("simbolos", nargs="*", help=f"entre: {', '.join(ENTRENABLES)}")
-    simbolos = parser.parse_args().simbolos or ENTRENABLES
+    parser.add_argument("--comision", type=float, default=0.0, help="comisión de ida y vuelta por lote, en la moneda de la cuenta")
+    args = parser.parse_args()
+    simbolos = args.simbolos or ENTRENABLES
+    if not 0 <= args.comision < float("inf"):
+        parser.error("--comision no puede ser negativa")
     if desconocidos := set(simbolos) - set(ENTRENABLES):
         parser.error(f"símbolos no válidos: {sorted(desconocidos)}")
     ctypes.windll.kernel32.SetPriorityClass(ctypes.wintypes.HANDLE(-1), BELOW_NORMAL_PRIORITY)  # el bot va primero
@@ -93,7 +106,7 @@ def main() -> None:
     for simbolo, (velas, info) in descargas.items():
         print(f"\n=== {simbolo}: {len(velas)} velas", flush=True)
         activo = ACTIVOS[simbolo]
-        bundle = entrenar_activo(activo, velas, info)
+        bundle = entrenar_activo(activo, velas, info, args.comision)
         guardar(activo, bundle)
         print(f"Guardado {activo.modelo}: umbral compra {bundle['umbral_long']}, venta {bundle['umbral_short']}", flush=True)
 

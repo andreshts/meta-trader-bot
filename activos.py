@@ -28,6 +28,10 @@ class Activo:
     panel: Path  # lo que leen el indicador de MT5 y la ventana de configuración
     cierra_a_diario: bool = True
     umbrales: tuple | None = None  # (compra, venta) iniciales; si es None están en el .json junto al modelo
+    # Sin entradas en las velas que abren en esta franja, en hora de los modelos (el cierre de Nueva York es a las 00:00):
+    # desde media hora antes del cierre hasta pasada la reapertura. En las velas de Exness, el spread del EUR/USD es de 2,5
+    # a 6 veces el normal entre las 00:00 y la 01:00, y el oro y los índices no cotizan en esa hora. None = sin franja.
+    sin_entradas: tuple | None = ("23:30", "01:15")
 
     @property
     def detener(self) -> Path:
@@ -44,11 +48,12 @@ def _activo(simbolo: str, nombre: str, magic: int, lote_min: float, max_spread: 
                   carpeta / "trading_bot.lock", panel_mt5.RUTA.with_name(f"rf_bot_panel_{simbolo}.txt"))
 
 
-# El EUR/USD conserva sus rutas de siempre: su modelo, su estado de riesgo y, en la demo original, el bloqueo que
-# comparte con demo_exness_probe.py.
-EURUSD = Activo("EURUSDm", "EUR/USD", config.MAGIC_NUMBER, 0.01, config.MAX_SPREAD_PUNTOS, config.SYMBOL,
-                config.MODEL_PATH, LOGS, config.LOCK_PATH if cuenta.CUENTA.login == cuenta.DEMO.login else LOGS / "trading_bot.lock",
-                panel_mt5.RUTA, cierra_a_diario=False, umbrales=(0.30, 0.30))
+# El EUR/USD conserva sus rutas de siempre para el estado de riesgo y, en la demo original, el bloqueo que comparte con
+# demo_exness_probe.py. Su modelo es, como los demás, el entrenado con velas de Exness (train_exness.py): el de
+# config.MODEL_PATH se entrenó con otro servidor, cuyo volumen de ticks y spread no son comparables.
+EURUSD = Activo("EURUSDm", "EUR/USD", config.MAGIC_NUMBER, 0.01, config.MAX_SPREAD_PUNTOS, "EURUSDm",
+                MODELOS / "EURUSDm.pkl", LOGS, config.LOCK_PATH if cuenta.CUENTA.login == cuenta.DEMO.login else LOGS / "trading_bot.lock",
+                panel_mt5.RUTA, cierra_a_diario=False)
 ACTIVOS = {a.simbolo: a for a in (
     EURUSD,
     _activo("XAUUSDm", "Oro", 202602, 0.01, 750),
@@ -67,6 +72,22 @@ def hora_modelo(tiempos) -> np.ndarray:
     utc = pd.to_datetime(np.asarray(tiempos, dtype=np.int64), unit="s", utc=True)
     nueva_york = utc.tz_convert("America/New_York").tz_localize(None)
     return ((nueva_york - pd.Timestamp(0)) // pd.Timedelta(seconds=1)).to_numpy(dtype=np.int64) + 7 * 3600
+
+
+def segundos_del_dia(hora: str) -> int:
+    """"HH:MM" en segundos desde las 00:00. ValueError si no es una hora."""
+    horas, _, minutos = hora.partition(":")
+    if not (len(horas) == len(minutos) == 2 and horas.isdigit() and minutos.isdigit() and int(horas) < 24 and int(minutos) < 60):
+        raise ValueError(f"{hora!r} no es una hora HH:MM")
+    return int(horas) * 3600 + int(minutos) * 60
+
+
+def en_franja(tiempo_servidor: int, franja: tuple) -> bool:
+    """True si esa hora del servidor cae en la franja (inicio, fin), dada en hora de los modelos. El inicio entra y el
+    fin no; una franja puede cruzar la medianoche."""
+    inicio, fin = (segundos_del_dia(h) for h in franja)
+    t = int(hora_modelo([tiempo_servidor])[0]) % 86400
+    return inicio <= t < fin if inicio <= fin else t >= inicio or t < fin
 
 
 def es_cierre_diario(anterior: int, siguiente: int) -> bool:

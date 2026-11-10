@@ -27,6 +27,8 @@ class FakeMT5:
         # servidor hasta ejecutar_colocadas() o cancelar_colocadas()) o "nada" (nunca llegó al servidor).
         self.modo_incierto = "nada"
         self.fraccion_parcial = 0.5
+        self.deslizamiento = 0.0   # las aperturas se ejecutan a este precio de más respecto al pedido
+        self.modificaciones, self.rechaza_modificar = [], False  # peticiones de cambio de SL/TP
         # Defectos de los datos: velas cerradas atrasadas (segundos), tope de velas devueltas, velas que faltan.
         self.atraso_cerradas_s, self.max_velas, self.velas_que_faltan = 0, None, set()
         self._ticket = 5000
@@ -133,6 +135,13 @@ class FakeMT5:
         return SimpleNamespace(retcode=0, comment="Done")
 
     def order_send(self, request):
+        if request.get("action") == _mt5.TRADE_ACTION_SLTP:
+            self.modificaciones.append(request)
+            if self.rechaza_modificar:
+                return SimpleNamespace(retcode=_mt5.TRADE_RETCODE_INVALID_STOPS, comment="Invalid stops")
+            pos = next(p for p in self.posiciones if p.ticket == request["position"])
+            pos.sl, pos.tp = request["sl"], request["tp"]
+            return SimpleNamespace(retcode=_mt5.TRADE_RETCODE_DONE, comment="Done")
         self.enviadas.append(request)
         retcode = self.respuestas.pop(0) if self.respuestas else _mt5.TRADE_RETCODE_DONE
         orden = self._nuevo_ticket()
@@ -183,5 +192,5 @@ class FakeMT5:
             self.posiciones.append(SimpleNamespace(
                 ticket=orden, volume=volumen, time=self.tick.time, magic=request["magic"], symbol=request["symbol"],
                 type=_mt5.POSITION_TYPE_BUY if request["type"] == _mt5.ORDER_TYPE_BUY else _mt5.POSITION_TYPE_SELL,
-                price_open=request["price"], sl=request["sl"], tp=request["tp"]))
+                price_open=request["price"] + self.deslizamiento, sl=request["sl"], tp=request["tp"]))
             self.deals.append(self._deal(_mt5.DEAL_ENTRY_IN, orden, orden, volumen, request["price"], request["comment"]))

@@ -849,3 +849,47 @@ def test_mientras_no_hay_conexion_se_llama_a_al_esperar_y_puede_detener_el_bot(m
     monkeypatch.setattr(tb, "al_esperar", detener)
     with pytest.raises(SystemExit):
         tb.esperar_conexion(mt5.cuenta.login)
+
+
+# ---------------- SL y TP tras un deslizamiento ----------------
+def test_sin_deslizamiento_no_se_tocan_el_sl_ni_el_tp(mt5, bundle):
+    tb.ciclo(bundle, nuevo_estado(mt5))
+    assert len(mt5.posiciones) == 1 and mt5.modificaciones == []
+
+
+@pytest.mark.parametrize("deslizamiento", [0.00030, -0.00020])
+def test_el_sl_y_el_tp_se_recolocan_a_su_distancia_del_precio_real(mt5, bundle, deslizamiento):
+    mt5.deslizamiento = deslizamiento
+    tb.ciclo(bundle, nuevo_estado(mt5))
+    pedido, pos = aperturas(mt5)[0], mt5.posiciones[0]
+    assert pos.price_open == pytest.approx(pedido["price"] + deslizamiento)
+    assert pos.price_open - pos.sl == pytest.approx(pedido["price"] - pedido["sl"], abs=1e-9)  # la misma distancia
+    assert pos.tp - pos.price_open == pytest.approx(pedido["tp"] - pedido["price"], abs=1e-9)
+    assert len(mt5.modificaciones) == 1 and mt5.modificaciones[0]["position"] == pos.ticket
+    assert cierres(mt5) == []  # la modificación no es un cierre
+
+
+def test_en_una_venta_tambien_se_recolocan(mt5, bundle):
+    bundle["model_long"], bundle["model_short"] = ModeloFijo(0.1), ModeloFijo(0.9)
+    mt5.deslizamiento = -0.00030  # una venta ejecutada más abajo de lo pedido
+    tb.ciclo(bundle, nuevo_estado(mt5))
+    pedido, pos = aperturas(mt5)[0], mt5.posiciones[0]
+    assert pos.sl - pos.price_open == pytest.approx(pedido["sl"] - pedido["price"], abs=1e-9)
+    assert pos.price_open - pos.tp == pytest.approx(pedido["price"] - pedido["tp"], abs=1e-9)
+
+
+def test_si_la_modificacion_falla_la_posicion_conserva_los_niveles_enviados(mt5, bundle, caplog):
+    mt5.deslizamiento, mt5.rechaza_modificar = 0.00030, True
+    estado = nuevo_estado(mt5)
+    with caplog.at_level("WARNING", logger="trading_bot"):
+        tb.ciclo(bundle, estado)
+    pedido, pos = aperturas(mt5)[0], mt5.posiciones[0]
+    assert (pos.sl, pos.tp) == (pedido["sl"], pedido["tp"]) and estado["pendiente"] is None
+    assert "No se pudieron recolocar" in caplog.text
+
+
+def test_se_puede_desactivar_el_ajuste(mt5, bundle, monkeypatch):
+    monkeypatch.setattr(config, "AJUSTAR_SL_TP_A_EJECUCION", False)
+    mt5.deslizamiento = 0.00030
+    tb.ciclo(bundle, nuevo_estado(mt5))
+    assert mt5.modificaciones == []

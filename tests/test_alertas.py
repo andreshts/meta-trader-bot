@@ -175,7 +175,7 @@ def lanzar(monkeypatch):
                    "MAGICS_CUENTA", "ESTADO_CUENTA_PATH", "BLOQUEO_CUENTA_PATH", "MAX_RIESGO_ABIERTO_PCT", "MAX_POSICIONES_CUENTA"):
         monkeypatch.setattr(config, nombre, getattr(config, nombre))
     for nombre in ("verificar_cuenta", "cargar_modelo", "build_features", "ciclo", "resultado_del_dia", "es_salto_de_fin_de_semana",
-                   "al_esperar"):
+                   "al_esperar", "evaluar_entrada"):
         monkeypatch.setattr(tb, nombre, getattr(tb, nombre))
     avisos = Mock()
     monkeypatch.setattr(lanzador, "PanelMT5", Mock())

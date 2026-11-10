@@ -51,6 +51,7 @@ RIESGO_PCT = None         # ej. 0.005 = 0.5% del equity por operación; None = V
 MAX_SPREAD_PUNTOS = 25
 MAX_RETRASO_ENTRADA_S = 60
 DESVIACION_SLIPPAGE = 20
+AJUSTAR_SL_TP_A_EJECUCION = True  # tras entrar, el SL y el TP se recolocan a su distancia del precio real de ejecución
 MAGIC_NUMBER = 202601
 PERMITIR_CUENTA_REAL = False  # el bot se detiene en cuentas reales salvo que se active a propósito
 EXIGIR_VENTAJA_SIGNIFICATIVA = True  # el bot no arranca sin ventaja significativa en el walk-forward

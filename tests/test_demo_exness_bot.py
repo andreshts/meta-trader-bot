@@ -1,4 +1,5 @@
 """Límites del lanzador: solo la demo autorizada, duración acotada, hora del modelo y umbral manual."""
+import dataclasses
 import sys
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -6,6 +7,7 @@ from unittest.mock import Mock
 import pandas as pd
 import pytest
 
+import activos
 import config
 import demo_exness_bot as lanzador
 from activos import ACTIVOS, EURUSD
@@ -51,7 +53,7 @@ def test_el_modelo_se_valida_contra_su_simbolo_y_se_restaura(monkeypatch):
     visto = []
     monkeypatch.setattr(config, "SYMBOL", EURUSD.simbolo)
     monkeypatch.setattr(lanzador, "_cargar_modelo", lambda: visto.append(config.SYMBOL) or {})
-    lanzador.cargar_modelo()
+    lanzador.cargar_modelo(dataclasses.replace(EURUSD, simbolo_modelo="EURUSD"))  # un modelo entrenado con otro nombre
     assert visto == ["EURUSD"]
     assert config.SYMBOL == "EURUSDm"
 
@@ -77,7 +79,7 @@ def lanzar(monkeypatch):
                    "MAGICS_CUENTA", "ESTADO_CUENTA_PATH", "BLOQUEO_CUENTA_PATH", "MAX_RIESGO_ABIERTO_PCT", "MAX_POSICIONES_CUENTA"):
         monkeypatch.setattr(config, nombre, getattr(config, nombre))
     for nombre in ("verificar_cuenta", "cargar_modelo", "build_features", "ciclo", "resultado_del_dia",
-                   "es_salto_de_fin_de_semana", "al_esperar"):
+                   "es_salto_de_fin_de_semana", "al_esperar", "evaluar_entrada"):
         monkeypatch.setattr(tb, nombre, getattr(tb, nombre))  # main() los sustituye: así se restauran
     panel, modelo = Mock(), {}
     monkeypatch.setattr(lanzador, "PanelMT5", Mock(return_value=panel))
@@ -249,7 +251,7 @@ def test_topes_de_cuenta_no_validos_no_arrancan(lanzar, argumentos):
 def test_sin_horas_la_sesion_no_tiene_fin(monkeypatch):
     tb = lanzador.trading_bot
     for nombre in ("verificar_cuenta", "cargar_modelo", "build_features", "ciclo", "resultado_del_dia",
-                   "es_salto_de_fin_de_semana", "al_esperar", "main"):
+                   "es_salto_de_fin_de_semana", "al_esperar", "evaluar_entrada", "main"):
         monkeypatch.setattr(tb, nombre, getattr(tb, nombre))
     for nombre in ("SYMBOL", "MT5_PATH", "EXIGIR_VENTAJA_SIGNIFICATIVA", "PERMITIR_CUENTA_REAL", "MAGIC_NUMBER", "VOLUMEN",
                    "MAX_SPREAD_PUNTOS", "DESVIACION_SLIPPAGE", "MAX_PERDIDA_DIARIA_PCT", "MAX_DRAWDOWN_PCT", "RIESGO_PCT",
@@ -282,3 +284,54 @@ def test_mientras_espera_la_conexion_da_el_latido_y_atiende_la_orden_de_detener(
 def test_mientras_espera_la_conexion_tambien_termina_la_sesion():
     with pytest.raises(SystemExit):
         lanzador.ciclo_con_limite(0, Mock()).al_esperar()
+
+
+# ---------------- franja sin entradas ----------------
+# 1794261600 = 2026-11-09 22:00 UTC = 17:00 de Nueva York = 00:00 en hora de los modelos.
+CIERRE_NY = 1794261600
+
+
+@pytest.mark.parametrize("minutos,dentro", [(-45, False), (-30, True), (-15, True), (0, True), (60, True), (75, False), (600, False)])
+def test_la_franja_cruza_la_medianoche_de_los_modelos(minutos, dentro):
+    assert activos.en_franja(CIERRE_NY + minutos * 60, ("23:30", "01:15")) is dentro
+
+
+def test_la_franja_sigue_al_cierre_de_nueva_york_tambien_en_verano():
+    verano = 1783026000  # 2026-07-02 21:00 UTC = 17:00 de Nueva York
+    assert activos.en_franja(verano, ("23:30", "01:15")) and not activos.en_franja(verano - 3600, ("23:30", "01:15"))
+    assert activos.en_franja(verano - 3600, ("22:00", "23:30"))  # una franja que no cruza la medianoche
+
+
+def test_en_la_franja_no_se_evalua_y_fuera_si(monkeypatch):
+    evaluar = Mock()
+    monkeypatch.setattr(lanzador, "_evaluar_entrada", evaluar)
+    monkeypatch.setattr(lanzador.trading_bot, "log", Mock())
+    envuelta = lanzador.evaluar_fuera_de(("23:30", "01:15"))
+    envuelta({}, None, CIERRE_NY - 900, {})
+    evaluar.assert_not_called()
+    envuelta({}, None, CIERRE_NY - 3600, {})
+    evaluar.assert_called_once_with({}, None, CIERRE_NY - 3600, {})
+
+
+def test_cada_activo_lleva_su_franja_y_se_puede_cambiar_o_apagar(lanzar):
+    tb = lanzador.trading_bot
+    original = tb.evaluar_entrada
+    lanzar("--sin-entradas", "off")
+    assert tb.evaluar_entrada is original
+    lanzar()
+    assert tb.evaluar_entrada is not original  # la franja por defecto del activo
+    assert lanzador.leer_argumentos().sin_entradas is lanzador.DEL_MODELO
+    lanzar("--sin-entradas", "22:00-01:30")
+    assert lanzador.leer_argumentos().sin_entradas == ("22:00", "01:30")
+
+
+@pytest.mark.parametrize("valor", ["23:30", "25:00-01:00", "23.30-01.15", "a-b", "2330-0115"])
+def test_una_franja_mal_escrita_no_arranca(lanzar, valor):
+    with pytest.raises(SystemExit) as salida:
+        lanzar("--sin-entradas", valor)
+    assert salida.value.code == 2
+
+
+def test_el_eurusd_usa_como_los_demas_un_modelo_entrenado_con_velas_de_exness():
+    assert EURUSD.simbolo_modelo == "EURUSDm" and EURUSD.modelo.parent == ACTIVOS["XAUUSDm"].modelo.parent
+    assert EURUSD.umbrales is None  # sus umbrales iniciales salen del entrenamiento

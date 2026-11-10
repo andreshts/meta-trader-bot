@@ -419,6 +419,33 @@ def _enviar_entrada(lado: str, tipo: int, precio: float, sl: float, tp: float, v
     else:
         estado["pendiente"] = None  # ejecutada (la posición existe) o rechazada (no hay orden)
     guardar_estado(estado)
+    if resultado == EJECUTADA and config.AJUSTAR_SL_TP_A_EJECUCION:
+        try:
+            recolocar_sl_tp(precio, sl, tp, info)
+        except Exception:
+            log.exception("No se pudieron recolocar el SL y el TP; la posición conserva los que se enviaron")
+
+
+def recolocar_sl_tp(precio_pedido: float, sl: float, tp: float, info) -> None:
+    """Si la orden se ejecutó a otro precio, mueve el SL y el TP para que queden a la distancia prevista del
+    precio real, como en el entrenamiento. Con ejecución a mercado el broker no respeta `deviation`, así que el
+    deslizamiento puede ser cualquiera. Si la modificación falla, la posición conserva los niveles enviados.
+    """
+    pos = posicion_abierta()
+    if pos is None:
+        return
+    desvio = pos.price_open - precio_pedido
+    if abs(desvio) < info.point / 2:
+        return
+    nuevo_sl, nuevo_tp = round(sl + desvio, info.digits), round(tp + desvio, info.digits)
+    result = mt5.order_send({"action": mt5.TRADE_ACTION_SLTP, "symbol": config.SYMBOL, "position": pos.ticket,
+                             "sl": nuevo_sl, "tp": nuevo_tp, "magic": config.MAGIC_NUMBER})
+    if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
+        log.info("SL y TP recolocados por una ejecución a %.1f puntos del precio pedido: sl=%s tp=%s",
+                 desvio / info.point, nuevo_sl, nuevo_tp)
+    else:
+        log.warning("No se pudieron recolocar el SL y el TP (%s); la posición conserva los que se enviaron",
+                    mt5.last_error() if result is None else f"retcode={result.retcode} comment={result.comment}")
 
 
 def resolver_pendiente(estado: dict) -> None:

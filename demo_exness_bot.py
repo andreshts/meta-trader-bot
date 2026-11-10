@@ -24,7 +24,7 @@ import numpy as np
 import alertas
 import config
 import trading_bot
-from activos import ACTIVOS, EURUSD, Activo, es_cierre_diario, hora_modelo
+from activos import ACTIVOS, EURUSD, Activo, en_franja, es_cierre_diario, hora_modelo, segundos_del_dia
 from cuenta import CUENTA, LOGS
 from features import build_features
 from panel_mt5 import PanelMT5
@@ -37,6 +37,7 @@ _verificar_cuenta = trading_bot.verificar_cuenta
 _cargar_modelo = trading_bot.cargar_modelo
 _ciclo = trading_bot.ciclo
 _es_salto_de_fin_de_semana = trading_bot.es_salto_de_fin_de_semana
+_evaluar_entrada = trading_bot.evaluar_entrada
 
 
 def verificar_cuenta(login_esperado=None) -> int:
@@ -81,6 +82,28 @@ def umbral_valido(texto: str) -> float:
 def umbral_o_apagado(texto: str) -> float | None:
     """`off` no opera ese lado."""
     return None if texto == "off" else umbral_valido(texto)
+
+
+def franja_o_apagada(texto: str) -> tuple | None:
+    """`HH:MM-HH:MM` en hora de los modelos; `off` no aplica ninguna franja."""
+    if texto == "off":
+        return None
+    inicio, _, fin = texto.partition("-")
+    try:
+        segundos_del_dia(inicio), segundos_del_dia(fin)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(f"{texto}: {e}; usa HH:MM-HH:MM u off") from None
+    return inicio, fin
+
+
+def evaluar_fuera_de(franja: tuple):
+    """La evaluación de entradas del bot, salvo en las velas que abren dentro de la franja."""
+    def evaluar_entrada(bundle: dict, info, bar_time: int, estado: dict) -> None:
+        if en_franja(bar_time, franja):
+            trading_bot.log.info("Vela dentro de la franja sin entradas (%s a %s, hora de los modelos); no se evalúa", *franja)
+            return
+        _evaluar_entrada(bundle, info, bar_time, estado)
+    return evaluar_entrada
 
 
 def numero_positivo(texto: str) -> float:
@@ -166,6 +189,8 @@ def leer_argumentos() -> argparse.Namespace:
     lote.add_argument("--volumen", type=numero_positivo, help="lote fijo de cada operación")
     lote.add_argument("--riesgo", type=porcentaje, help="lote calculado para arriesgar este %% de la equity por operación")
     parser.add_argument("--max-spread", type=numero_positivo, help="spread máximo para entrar, en puntos")
+    parser.add_argument("--sin-entradas", type=franja_o_apagada, default=DEL_MODELO,
+                        help="franja sin entradas HH:MM-HH:MM, en hora de los modelos (cierre de Nueva York = 00:00), u off")
     parser.add_argument("--perdida-diaria", type=porcentaje, help="pérdida máxima del día, en %% del balance")
     parser.add_argument("--drawdown", type=porcentaje, help="caída máxima desde el máximo de equity, en %%")
     parser.add_argument("--riesgo-abierto", type=porcentaje,
@@ -226,6 +251,9 @@ def main() -> None:
     trading_bot.al_esperar = trading_bot.ciclo.al_esperar
     if activo.cierra_a_diario:
         trading_bot.es_salto_de_fin_de_semana = salto_admitido
+    franja = activo.sin_entradas if args.sin_entradas is DEL_MODELO else args.sin_entradas
+    if franja is not None:
+        trading_bot.evaluar_entrada = evaluar_fuera_de(franja)
     trading_bot.log.addHandler(panel)
     avisos = alertas.crear(f"{activo.simbolo} · {CUENTA.tipo} {CUENTA.login}")  # None sin Telegram configurado
     if avisos is not None:

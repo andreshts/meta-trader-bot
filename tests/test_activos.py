@@ -37,3 +37,16 @@ def test_el_umbral_inicial_da_la_frecuencia_pedida():
     umbral = train_exness.umbral_por_frecuencia(proba, semanas=10)
     assert umbral == 0.39
     assert 50 <= np.count_nonzero(proba >= umbral) <= 160
+
+
+def test_la_comision_por_lote_se_pasa_a_puntos():
+    from types import SimpleNamespace
+    eurusd = SimpleNamespace(trade_tick_value=1.0, trade_tick_size=0.00001, point=0.00001)  # 1 USD por punto y lote
+    oro = SimpleNamespace(trade_tick_value=0.1, trade_tick_size=0.001, point=0.001)         # 0,10 USD por punto y lote
+    assert train_exness.comision_en_puntos(7.0, eurusd) == pytest.approx(7.0)
+    assert train_exness.comision_en_puntos(7.0, oro) == pytest.approx(70.0)
+    assert train_exness.comision_en_puntos(0.0, oro) == 0.0
+
+
+def test_todos_los_activos_se_entrenan_con_velas_de_exness():
+    assert train_exness.ENTRENABLES == list(activos.ACTIVOS)

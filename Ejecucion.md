@@ -221,6 +221,13 @@ Puesta en marcha:
 
 No se avisan las probabilidades de cada vela ni el filtro de spread. Un corte de conexión de menos de `AVISO_SIN_CONEXION_S` (60 s) solo queda en el log. Si el proceso muere sin poder despedirse (se mata desde el Administrador de tareas, se apaga el equipo), quien avisa es el vigilante.
 
+### Ajustes de ejecución para Exness
+
+* **SL y TP desde el precio real** (`AJUSTAR_SL_TP_A_EJECUCION`): con ejecución a mercado el broker no respeta `deviation`, así que la orden puede ejecutarse a otro precio que el pedido. Tras cada entrada el bot compara el precio de la posición con el pedido y, si difieren, mueve el SL y el TP con `TRADE_ACTION_SLTP` para que queden a la distancia prevista del precio real, como en el entrenamiento. Si la modificación falla, la posición conserva los niveles enviados y queda un aviso.
+* **Franja sin entradas** (`Activo.sin_entradas`, `--sin-entradas HH:MM-HH:MM` u `off`): por defecto no se evalúan entradas en las velas que abren entre las 23:30 y la 01:15 en hora de los modelos, es decir, desde media hora antes del cierre de Nueva York hasta pasada la reapertura, también con el cambio de horario. Medido en 30.000 velas M15 de Exness por activo: el spread del EUR/USD es de 2,5 a 6 veces el normal entre las 00:00 y la 01:00, y el oro y los índices no cotizan en esa hora. Es un filtro solo de ejecución: el entrenamiento no lo aplica. Las posiciones abiertas se siguen gestionando igual.
+* **Comisión según el tipo de cuenta** (`python train_exness.py [SIMBOLO ...] --comision 7`): comisión de ida y vuelta por lote, en la moneda de la cuenta, que el backtest descuenta de cada operación. En una cuenta Standard (símbolos con sufijo `m`, la de la demo) es 0; en una Raw Spread o Zero, la que cobre Exness por ese instrumento. Queda guardada en `costes` dentro del modelo.
+* **EUR/USD con velas de Exness:** `train_exness.py` entrena también `EURUSDm` y el lanzador usa `models/exness/EURUSDm.pkl`. El modelo de `models/random_forest_mt5.pkl` (entrenado con MetaQuotes-Demo, cuyo volumen de ticks y spread no son comparables) queda solo para `trading_bot.py` a secas.
+
 ### Funcionamiento continuo y vigilante
 
 * **Sesión sin límite:** sin `--horas` (en la ventana, con "Duración" vacía) el bot corre hasta que se detenga, así el time stop no depende de relanzarlo. El panel de MT5 muestra `--:--` como hora de fin.
