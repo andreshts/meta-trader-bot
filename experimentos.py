@@ -102,6 +102,65 @@ def noticias(df: pd.DataFrame, contexto: dict) -> pd.DataFrame:
     return df
 
 
+# ---------------- gestión de la operación (cambia cómo sale cada trade, no la señal) ----------------
+FIJA, BREAKEVEN, TRAILING, PARCIAL = "fija", "breakeven", "trailing", "parcial"
+ACTIVACION_R = 1.0  # a +1 R a favor se mueve el stop a la entrada (breakeven) o se cierra la mitad (parcial)
+
+
+def _salida_gestionada(apertura, minimo, maximo, e: int, cierre: int, entrada: float, sl_dist: float, tp_dist: float,
+                       gestion: str) -> tuple:
+    """(resultado bruto en precio por unidad, última vela con el trade abierto, si salió por tiempo, ejecuciones extra).
+
+    Una compra vista con los precios a los que saldría (una venta se pasa cambiada de signo). El stop solo se mueve
+    al cerrar una vela, con lo visto hasta ella, y vale desde la siguiente: es lo que puede hacer el bot, que actúa
+    en cada vela nueva. Si la apertura siguiente ya está por debajo del stop nuevo, el broker lo rechazaría y se
+    conserva el anterior.
+    """
+    sl, tp, mejor = entrada - sl_dist, entrada + tp_dist, -np.inf
+    abierto, realizado, extra = 1.0, 0.0, 0.0
+    for j in range(e, cierre):
+        if minimo[j] <= sl:
+            return realizado + abierto * (min(apertura[j], sl) - entrada), j, False, extra
+        if maximo[j] >= tp:
+            return realizado + abierto * (tp - entrada), j, False, extra
+        if gestion == FIJA or j + 1 >= cierre:
+            continue
+        mejor = max(mejor, maximo[j])
+        activada = mejor >= entrada + ACTIVACION_R * sl_dist
+        if gestion == PARCIAL and activada and abierto == 1.0:
+            realizado, abierto, extra = 0.5 * (apertura[j + 1] - entrada), 0.5, 0.5  # media posición, a mercado
+        nuevo = mejor - sl_dist if gestion == TRAILING else entrada if activada else sl
+        if nuevo > sl and apertura[j + 1] > nuevo:
+            sl = nuevo
+    return realizado + abierto * (apertura[cierre] - entrada), cierre - 1, True, extra
+
+
+def etiquetar_con_gestion(gestion: str, etiquetar=tm.etiquetar_triple_barrera):
+    """`etiquetar_triple_barrera` con r, k y to recalculados para esa gestión. `y` (lo que aprende el modelo) y la
+    purga no cambian: el stop solo se acerca, así que ningún trade dura más que con el stop y el objetivo fijos."""
+    def etiquetar_gestionado(df, point, sl_mult, tp_mult, n, comision_puntos=0.0, slippage_puntos=0.0,
+                             swap_long_puntos=0.0, swap_short_puntos=0.0, swap_3dias=3):
+        etiquetas = etiquetar(df, point, sl_mult, tp_mult, n, comision_puntos, slippage_puntos, swap_long_puntos,
+                              swap_short_puntos, swap_3dias)
+        o, h, l = (df[c].to_numpy(dtype=float) for c in ("open", "high", "low"))
+        spr = df["spread"].to_numpy(dtype=float) * point
+        atr, tiempos = df["atr"].to_numpy(dtype=float), df["time"].to_numpy(dtype=np.int64)
+        # La compra sale al bid; la venta, al ask, y cambiada de signo se trata como una compra.
+        vistas = {"long": (o, l, h, o + spr, swap_long_puntos), "short": (-(o + spr), -(h + spr), -(l + spr), -o, swap_short_puntos)}
+        for lado, (apertura, minimo, maximo, entradas, swap) in vistas.items():
+            r, k, to = (etiquetas[f"{c}_{lado}"].to_numpy(copy=True) for c in ("r", "k", "to"))
+            for t in np.flatnonzero(np.isfinite(r)):
+                e, sl_dist = t + 1, sl_mult * atr[t]
+                bruto, ultima, por_tiempo, extra = _salida_gestionada(apertura, minimo, maximo, e, e + n, entradas[e], sl_dist,
+                                                                      tp_mult * atr[t], gestion)
+                noches = tm.noches_de_swap(tiempos[e], tiempos[e + n if por_tiempo else ultima], swap_3dias)
+                costes = (comision_puntos + (2 + extra) * slippage_puntos) * point
+                r[t], k[t], to[t] = (bruto + noches * swap * point - costes) / sl_dist, ultima, por_tiempo
+            etiquetas[f"r_{lado}"], etiquetas[f"k_{lado}"], etiquetas[f"to_{lado}"] = r, k, to
+        return etiquetas
+    return etiquetar_gestionado
+
+
 def _sin_cambios(df: pd.DataFrame, contexto: dict) -> pd.DataFrame:
     return df
 
@@ -113,6 +172,7 @@ class Variante:
     features: object = ()  # columnas que se añaden a las 11 de la base; una función las da según el contexto
     filtro: object = None  # filas en las que se permite entrar (como el filtro de spread: ni entrenan ni cuentan)
     segmentos_train: int | None = None  # None = anclado; n = solo los últimos n segmentos (ventana deslizante)
+    gestion: str | None = None  # cómo sale cada trade: None = stop y objetivo fijos
 
     def columnas(self, contexto: dict) -> list:
         return list(self.features(contexto) if callable(self.features) else self.features)
@@ -132,6 +192,9 @@ VARIANTES = {
                                 lambda datos: datos["noticia_cerca"] == 0),
     "noticias_feature": Variante("5.4 Tiempo hasta la próxima noticia de alto impacto y desde la última", noticias,
                                  ("noticia_hasta", "noticia_desde")),
+    "breakeven": Variante("M2 Stop a la entrada cuando el precio llega a +1 R", gestion=BREAKEVEN),
+    "trailing": Variante("M2 Stop dinámico a 1,5 ATR del mejor precio alcanzado", gestion=TRAILING),
+    "parcial": Variante("M2 Media posición cerrada a +1 R y stop a la entrada para el resto", gestion=PARCIAL),
     "deslizante": Variante("4.3 Entrenamiento con ventana deslizante de unos 12 meses", segmentos_train=VENTANA_DESLIZANTE_SEGMENTOS),
 }
 
@@ -140,7 +203,7 @@ VARIANTES = {
 @contextmanager
 def con_variante(variante: Variante, contexto: dict):
     """Aplica la variante a train_model mientras dura el bloque y lo deja todo como estaba al salir."""
-    originales = list(FEATURES), tm.build_features, tm.ventanas_walk_forward
+    originales = list(FEATURES), tm.build_features, tm.ventanas_walk_forward, tm.etiquetar_triple_barrera
 
     def features_con_extra(velas: pd.DataFrame, point: float) -> pd.DataFrame:
         return variante.extra(build_features(velas, point), contexto)
@@ -154,11 +217,13 @@ def con_variante(variante: Variante, contexto: dict):
     tm.build_features = features_con_extra
     if variante.segmentos_train is not None:
         tm.ventanas_walk_forward = ventanas_deslizantes
+    if variante.gestion is not None:
+        tm.etiquetar_triple_barrera = etiquetar_con_gestion(variante.gestion, originales[3])
     try:
         yield
     finally:
         FEATURES[:] = originales[0]
-        tm.build_features, tm.ventanas_walk_forward = originales[1], originales[2]
+        tm.build_features, tm.ventanas_walk_forward, tm.etiquetar_triple_barrera = originales[1:]
 
 
 def preparar(variante: Variante, velas: pd.DataFrame, point: float, costes: dict, contexto: dict) -> pd.DataFrame:

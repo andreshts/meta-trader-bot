@@ -485,7 +485,8 @@ def resolver_pendiente(estado: dict) -> None:
     guardar_estado(estado)
 
 
-def cerrar(pos, info, login, causa: str = "time stop") -> None:
+def cerrar(pos, info, login, causa: str = "time stop", volumen: float | None = None) -> None:
+    """Cierra la posición a mercado, o solo `volumen` de ella."""
     verificar_cuenta(login)
     tick = mt5.symbol_info_tick(config.SYMBOL)
     if pos.type == mt5.POSITION_TYPE_BUY:
@@ -495,7 +496,7 @@ def cerrar(pos, info, login, causa: str = "time stop") -> None:
     enviar({
         "action": mt5.TRADE_ACTION_DEAL,
         "symbol": config.SYMBOL,
-        "volume": pos.volume,
+        "volume": pos.volume if volumen is None else volumen,
         "type": tipo,
         "position": pos.ticket,
         "price": precio,
@@ -505,7 +506,61 @@ def cerrar(pos, info, login, causa: str = "time stop") -> None:
         "type_time": mt5.ORDER_TIME_GTC,
         "type_filling": modo_llenado(info),
     }, f"Cierre por {causa} (ticket {pos.ticket})",
-        confirmar=lambda: all(p.ticket != pos.ticket for p in posiciones_del_bot()))
+        confirmar=lambda: all(p.ticket != pos.ticket or p.volume < pos.volume for p in posiciones_del_bot()))
+
+
+GESTIONES = ("breakeven", "trailing", "parcial")
+
+
+def plan_de_gestion(compra: bool, entrada: float, sl: float, tp: float, cerradas, point: float, gestion: str) -> tuple:
+    """(stop nuevo o None, si el precio ya avanzó GESTION_ACTIVACION_R) con las velas cerradas desde la entrada.
+
+    Es la regla de experimentos.py: el stop solo se mueve al cerrar una vela, con lo visto hasta ella, y nunca se
+    aleja. La distancia de riesgo sale del objetivo, que no se mueve. La venta sale al ask (bid + spread de la vela).
+    """
+    sl_dist = abs(tp - entrada) * config.SL_MULTIPLICADOR_ATR / config.TP_MULTIPLICADOR_ATR
+    if cerradas.empty or sl_dist <= 0:
+        return None, False
+    if compra:
+        mejor = float(cerradas["high"].max())
+        activada = mejor >= entrada + config.GESTION_ACTIVACION_R * sl_dist
+        nuevo = mejor - sl_dist if gestion == "trailing" else entrada if activada else None
+        return (nuevo if nuevo is not None and nuevo > sl + point / 2 else None), activada
+    mejor = float((cerradas["low"] + cerradas["spread"] * point).min())
+    activada = mejor <= entrada - config.GESTION_ACTIVACION_R * sl_dist
+    nuevo = mejor + sl_dist if gestion == "trailing" else entrada if activada else None
+    return (nuevo if nuevo is not None and nuevo < sl - point / 2 else None), activada
+
+
+def ajustar_salida(pos, info, login) -> None:
+    """Con GESTION, al abrir cada vela: cierra media posición si toca y acerca el stop. Si el precio ya pasó el
+    stop nuevo, o el broker lo rechaza, la posición conserva el que tenía y se vuelve a intentar en la vela siguiente."""
+    if config.GESTION is None or not pos.sl or not pos.tp:
+        return
+    compra = pos.type == mt5.POSITION_TYPE_BUY
+    cerradas = mt5_utils.descargar_velas(1, config.MAX_BARS_EN_TRADE + 5)
+    cerradas = cerradas[cerradas["time"] + config.TIMEFRAME_SEGUNDOS > pos.time]  # desde la vela de la entrada
+    nuevo_sl, activada = plan_de_gestion(compra, pos.price_open, pos.sl, pos.tp, cerradas, info.point, config.GESTION)
+    if config.GESTION == "parcial" and activada and not any(
+            d.position_id == pos.ticket and d.entry == mt5.DEAL_ENTRY_OUT for d in deals_del_bot()):
+        mitad = round(math.floor(pos.volume / 2 / info.volume_step + 1e-9) * info.volume_step, 8)
+        if mitad >= info.volume_min and not ordenes_activas_del_bot():
+            cerrar(pos, info, login, "parcial", mitad)
+    if nuevo_sl is None:
+        return
+    tick = mt5.symbol_info_tick(config.SYMBOL)
+    margen = getattr(info, "trade_stops_level", 0) * info.point
+    if tick is None or (compra and tick.bid - margen <= nuevo_sl) or (not compra and tick.ask + margen >= nuevo_sl):
+        log.info("El stop no se puede mover a %s: el precio ya está ahí; se conserva %s", round(nuevo_sl, info.digits), pos.sl)
+        return
+    nuevo_sl = round(nuevo_sl, info.digits)
+    result = mt5.order_send({"action": mt5.TRADE_ACTION_SLTP, "symbol": config.SYMBOL, "position": pos.ticket,
+                             "sl": nuevo_sl, "tp": pos.tp, "magic": config.MAGIC_NUMBER})
+    if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
+        log.info("Stop movido de %s a %s (%s)", pos.sl, nuevo_sl, config.GESTION)
+    else:
+        log.warning("No se pudo mover el stop a %s (%s); la posición conserva %s", nuevo_sl,
+                    mt5.last_error() if result is None else f"retcode={result.retcode} comment={result.comment}", pos.sl)
 
 
 def gestionar_posicion(pos, info, estado: dict, cuenta=None) -> None:
@@ -846,6 +901,8 @@ def ciclo(bundle: dict, estado: dict) -> None:
     except RuntimeError:
         log.warning("No se pudo leer el historial de deals", exc_info=True)
     if pos is not None:
+        if posicion_abierta() is not None:  # sigue abierta tras gestionar_posicion
+            ajustar_salida(pos, info, estado["login"])
         return
     motivo = motivo_sin_entradas(estado, cuenta)
     if motivo is None and actividad_en_la_vela(bar_time):

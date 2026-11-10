@@ -62,6 +62,8 @@ SEMILLAS_ROBUSTEZ = (42, 1, 2)  # el walk-forward se repite con cada semilla del
 MAX_LOTES = 1.0           # tope de volumen por operación, también con RIESGO_PCT
 MAX_PERDIDA_DIARIA_PCT = 0.02  # sin nuevas entradas si el bot pierde hoy (día del servidor) este % del balance
 MAX_DRAWDOWN_PCT = 0.10   # sin nuevas entradas si la equity cae este % desde su máximo (persistido)
+GESTION = None            # gestión de la posición abierta: None (stop y objetivo fijos), "breakeven", "trailing" o "parcial"
+GESTION_ACTIVACION_R = 1.0  # a este avance, en múltiplos del riesgo, se mueve el stop a la entrada o se cierra la mitad
 CERRAR_AL_LIMITE = False  # al alcanzar uno de esos dos límites, el bot cierra además su posición abierta
 # Riesgo a nivel de cuenta, para cuando varios bots (uno por activo) comparten cuenta. Con None no se aplica.
 MAGICS_CUENTA = None          # magics de todos los bots de la cuenta; None = solo MAGIC_NUMBER

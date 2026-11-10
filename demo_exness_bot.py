@@ -225,6 +225,8 @@ def leer_argumentos() -> argparse.Namespace:
                         help="no aplica el filtro de noticias de alto impacto (calendario económico)")
     parser.add_argument("--perdida-diaria", type=porcentaje, help="pérdida máxima del día, en %% del balance")
     parser.add_argument("--drawdown", type=porcentaje, help="caída máxima desde el máximo de equity, en %%")
+    parser.add_argument("--gestion", choices=trading_bot.GESTIONES,
+                        help="gestión de la posición abierta: stop a la entrada, stop dinámico o cierre de la mitad a +1 R")
     parser.add_argument("--cerrar-al-limite", action="store_true",
                         help="al alcanzar la pérdida diaria o el drawdown, cierra además la posición abierta del activo")
     parser.add_argument("--riesgo-abierto", type=porcentaje,
@@ -245,6 +247,7 @@ def configurar_activo(activo: Activo, args: argparse.Namespace) -> None:
     config.MAX_PERDIDA_DIARIA_PCT = args.perdida_diaria or config.MAX_PERDIDA_DIARIA_PCT
     config.MAX_DRAWDOWN_PCT = args.drawdown or config.MAX_DRAWDOWN_PCT
     config.CERRAR_AL_LIMITE = args.cerrar_al_limite
+    config.GESTION = args.gestion
     config.MT5_PATH = CUENTA.terminal
     config.EXIGIR_VENTAJA_SIGNIFICATIVA = CUENTA.exigir_ventaja
     config.PERMITIR_CUENTA_REAL = CUENTA.real

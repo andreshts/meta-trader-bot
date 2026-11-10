@@ -43,6 +43,8 @@ class Instantanea:
 def _motivo(salida) -> str:
     if "time stop" in salida.comment:
         return "Por tiempo"
+    if "parcial" in salida.comment:
+        return "Parcial"
     if CIERRE_POR_LIMITE in salida.comment:
         return "Por límite"
     return MOTIVOS.get(salida.reason, "Bot")

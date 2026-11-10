@@ -13,7 +13,7 @@ Una mejora del modelo (feature, régimen, filtro, re-entrenamiento) solo cuenta 
 1. **Fijar la variante antes de mirar resultados:** qué se añade, con qué parámetros y qué se espera. No se ajustan parámetros viendo el test.
 2. **Walk-forward desde 2010** (`train_model.py`: 5 ventanas, purga por el final de cada etiqueta, 3 semillas), comparando contra la línea base, **con los mismos datos**.
 3. **Criterio:** que suba el ROC-AUC de forma estable entre ventanas **y** que la esperanza agregada mejore con las 3 semillas. Solo se considera ventaja real con `t >= 2` en todas las semillas, y además en el holdout (≥ 30 trades).
-4. **Contar las pruebas.** Cada variante evaluada sobre los mismos datos aumenta la probabilidad de un falso positivo. Llevamos **unas 46 variantes** (38 en EURUSD desde 2010 y 8 en el banco de experimentos sobre los 5 activos de Exness). Con tantas, un `t` cercano a 2 aislado no significa nada (ver [Entrenamiento.md](Entrenamiento.md)).
+4. **Contar las pruebas.** Cada variante evaluada sobre los mismos datos aumenta la probabilidad de un falso positivo. Llevamos **unas 49 variantes** (38 en EURUSD desde 2010 y 11 en el banco de experimentos sobre los 5 activos de Exness). Con tantas, un `t` cercano a 2 aislado no significa nada (ver [Entrenamiento.md](Entrenamiento.md)).
 5. **No tocar el holdout** (desde `HOLDOUT_DESDE = 2026-10-30`) para elegir variantes. Solo decide el despliegue final.
 6. **Pruebas automáticas** (`python -m pytest tests`) para el código nuevo, en particular contra fugas de datos del futuro, y documentar el resultado en [Entrenamiento.md](Entrenamiento.md).
 
@@ -60,6 +60,15 @@ No depende de encontrar ventaja: protege la cuenta en cualquier caso.
   - La API de Python de MT5 **no** da acceso al calendario: está solo en MQL5 (`CalendarValueHistory`). Opciones: un pequeño Expert Advisor en MQL5 que exporte los eventos a un CSV que lea el bot, o una fuente externa.
   - Hecho cuando: el bot lee los eventos, los registra en el log, bloquea entradas en la ventana y tiene pruebas automáticas. Para medir su efecto en el backtest hace falta el histórico de eventos; si no lo hay, se valida solo en Demo.
   - Resultado:
+- ❌ **1.6 Gestión de la posición abierta** (`config.GESTION`, `--gestion`; 2026-11-10). Tres reglas, fijadas antes de ver resultados, que no cambian la señal sino la salida. El stop solo se mueve al cerrar una vela y nunca se aleja:
+  - `breakeven`: stop a la entrada cuando el precio llega a +1 R;
+  - `trailing`: stop a 1,5 ATR del mejor precio alcanzado;
+  - `parcial`: media posición cerrada a mercado a +1 R y stop a la entrada para el resto.
+  - Resultado: ninguna mejora de forma consistente ([experimentos.py](experimentos.py), 5 activos, 3 semillas; `t` medio por activo en EUR/USD, oro, S&P 500, Nasdaq y DAX; la base da −0.08 / +0.60 / −0.48 / −0.47 / −1.91):
+    - `breakeven`: −0.22 / +0.18 / −0.40 / −0.36 / −2.18;
+    - `trailing`: +0.26 / −1.14 / 0 / −1.11 / 0 (en el S&P 500 y el DAX ningún umbral es rentable en validación y deja de operar);
+    - `parcial`: −0.40 / −0.22 / −0.49 / −0.53 / 0.
+  - Las tres quedan implementadas en el bot y probadas (la regla del bot coincide con la de la simulación), **desactivadas por defecto**.
 - [ ] 🔒 **1.5 Criterio de Kelly**: con una ventaja nula o negativa, Kelly da un tamaño de 0. Bloqueado hasta que exista una ventaja demostrada (Fase 4) y un intervalo de confianza para estimarla.
 
 ---
@@ -216,4 +225,5 @@ La dirección de EURUSD M15 no se puede predecir con velas (Fases 2 y 5), y en p
 | 2026-10-31 | Evaluadas 2.3 (`ADX(14)`, `+DI`, `-DI`), 2.4 (`Multi-timeframe real` H1/H4 cerrado) y su combinación en el walk-forward desde 2010: marcadas ❌ como features del modelo; `adx_wilder` y `mtf_cerrado` quedan en `features.py` con pruebas anti-fuga (111 tests). |
 | 2026-11-02 | Añadida la Fase 6 (seguimiento de tendencia por reglas), con reglas y criterio fijados antes de ver resultados. Evaluada 6.1 (Donchian 55/20 en D1, 6 mercados, y 5 comprobaciones): ❌ sin ventaja. `tendencia.py` con 23 pruebas nuevas (134 tests). |
 | 2026-11-10 | Banco de experimentos ([experimentos.py](experimentos.py), registro en `experimentos/registro.csv`): evalúa cada variante en los 5 activos de Exness con el walk-forward de `train_model.py`, 3 semillas y holdout desde 2026-01-01 sin tocar. Evaluadas 2.1, 2.2, 3.3a, 3.3b, 4.3 (12 meses) y 5.4 (activos relacionados): ❌ todas. La base da `t` medio −0.08 / +0.60 / −0.48 / −0.47 / −1.91, con mucha dispersión entre semillas (EUR/USD: +2.23 / −1.34 / −1.12). |
+| 2026-11-10 | Calendario económico (1.4): servicio MQL5, filtro en el bot y dos variantes en el banco, ❌ sin ventaja. Gestión de la posición (1.6: breakeven, trailing y parcial): medida en el banco, ❌ ninguna mejora; implementada en el bot y desactivada por defecto. |
 | 2026-11-02 | Añadida y evaluada 6.2 (cartera diversificada por sectores; enmienda de los índices con ETFs por falta de datos): ❌ sin ventaja. `tendencia.py --diversificada`, con filtro de calidad, pesos por sector y aviso de spreads erróneos (138 tests). |

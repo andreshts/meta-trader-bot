@@ -96,12 +96,14 @@ def test_un_dato_viejo_o_inexistente_de_otro_activo_vale_cero():
 
 
 def test_una_variante_no_deja_rastro_en_train_model():
-    originales = list(FEATURES), tm.build_features, tm.ventanas_walk_forward
+    originales = list(FEATURES), tm.build_features, tm.ventanas_walk_forward, tm.etiquetar_triple_barrera
+    with ex.con_variante(ex.VARIANTES["trailing"], {}):
+        assert tm.etiquetar_triple_barrera is not originales[3]
     with pytest.raises(RuntimeError):
         with ex.con_variante(ex.VARIANTES["sesiones"], {}):
             assert FEATURES[-4:] == ["ses_asia", "ses_londres", "ses_ny", "ses_solape"] and tm.build_features is not originales[1]
             raise RuntimeError("fallo a mitad de la evaluación")
-    assert (list(FEATURES), tm.build_features, tm.ventanas_walk_forward) == originales
+    assert (list(FEATURES), tm.build_features, tm.ventanas_walk_forward, tm.etiquetar_triple_barrera) == originales
 
 
 def test_la_ventana_deslizante_recorta_solo_el_entrenamiento():
@@ -154,3 +156,64 @@ def test_el_registro_se_acumula_y_la_tabla_compara_con_la_base(tmp_path):
     nueva = next(l for l in lineas if l.startswith("squeeze"))  # cuenta la última evaluación de cada semilla
     assert "+2.50 / +2.10 / +2.30" in nueva and "+3.30" in nueva and nueva.split()[-1] == "sí"
     assert "en 1 de 1 activos" in lineas[-1]
+
+
+# ---------------- gestión de la operación ----------------
+COSTES = dict(comision_puntos=2.0, slippage_puntos=1.0, swap_long_puntos=-3.0, swap_short_puntos=1.0, swap_3dias=3)
+
+
+def etiquetas(gestion, df, n=12):
+    return ex.etiquetar_con_gestion(gestion)(df, 0.01, 1.5, 3.0, n, **COSTES)
+
+
+def test_con_el_stop_fijo_la_gestion_reproduce_el_etiquetado_del_entrenamiento():
+    df = build_features(velas(700, semilla=3), 0.01)
+    original = tm.etiquetar_triple_barrera(df, 0.01, 1.5, 3.0, 12, **COSTES)
+    pd.testing.assert_frame_equal(etiquetas(ex.FIJA, df), original)
+    assert original["to_long"].any() and (~original["to_long"]).any()  # hay salidas por tiempo y por stop u objetivo
+
+
+@pytest.mark.parametrize("gestion", [ex.BREAKEVEN, ex.TRAILING, ex.PARCIAL])
+def test_la_gestion_no_cambia_lo_que_aprende_el_modelo_ni_alarga_ningun_trade(gestion):
+    df = build_features(velas(700, semilla=3), 0.01)
+    fija, gestionada = etiquetas(ex.FIJA, df), etiquetas(gestion, df)
+    for columna in ("y_long", "y_short", "fin_etiqueta", "t_fin_etiqueta"):
+        pd.testing.assert_series_equal(fija[columna], gestionada[columna])
+    for lado in tm.LADOS:
+        validas = fija[f"r_{lado}"].notna()
+        assert (gestionada.loc[validas, f"k_{lado}"] <= fija.loc[validas, f"k_{lado}"]).all()
+        assert not gestionada.loc[validas, f"r_{lado}"].equals(fija.loc[validas, f"r_{lado}"])
+
+
+def camino(*velas_ohl):
+    """Series de apertura, mínimo y máximo de una compra con entrada en 100, stop a 10 y objetivo a 20."""
+    o, l, h = (np.array(serie, dtype=float) for serie in zip(*velas_ohl))
+    return o, l, h, 0, len(o) - 1, 100.0, 10.0, 20.0
+
+
+def test_el_breakeven_sale_en_la_entrada_tras_llegar_a_mas_1r():
+    sube_y_vuelve = camino((100, 99, 111), (108, 99, 109), (99, 85, 99), (85, 85, 85))
+    assert ex._salida_gestionada(*sube_y_vuelve, ex.FIJA) == (-10.0, 2, False, 0.0)
+    assert ex._salida_gestionada(*sube_y_vuelve, ex.BREAKEVEN) == (0.0, 1, False, 0.0)
+    sin_llegar = camino((100, 99, 109), (108, 85, 109), (85, 85, 85))
+    assert ex._salida_gestionada(*sin_llegar, ex.BREAKEVEN) == (-10.0, 1, False, 0.0)
+
+
+def test_el_stop_no_se_mueve_dentro_de_la_vela_ni_por_encima_de_la_apertura_siguiente():
+    en_la_misma_vela = camino((100, 91, 111), (95, 95, 96), (95, 95, 95))  # toca +1 R y vuelve dentro de la misma vela
+    assert ex._salida_gestionada(*en_la_misma_vela, ex.BREAKEVEN)[0] == -5.0  # sale por tiempo: el stop no se pudo subir
+    hueco = camino((100, 99, 111), (98, 95, 99), (89, 89, 89), (89, 89, 89))  # abre ya bajo la entrada: stop rechazado
+    assert ex._salida_gestionada(*hueco, ex.BREAKEVEN) == (-11.0, 2, False, 0.0)  # y el stop original salta con el hueco
+
+
+def test_el_trailing_sigue_al_mejor_precio_a_la_distancia_del_stop():
+    tendencia = camino((100, 99, 106), (106, 105, 114), (113, 103, 113), (100, 100, 100))
+    assert ex._salida_gestionada(*tendencia, ex.TRAILING) == (4.0, 2, False, 0.0)  # stop en 114 - 10
+    assert ex._salida_gestionada(*tendencia, ex.FIJA)[2]  # con el stop fijo habría salido por tiempo
+
+
+def test_el_parcial_cierra_la_mitad_a_mercado_y_protege_el_resto():
+    sube_y_vuelve = camino((100, 99, 111), (108, 99, 109), (99, 85, 99), (85, 85, 85))
+    assert ex._salida_gestionada(*sube_y_vuelve, ex.PARCIAL) == (4.0, 1, False, 0.5)  # media a 108 y media en la entrada
+    hasta_el_objetivo = camino((100, 99, 111), (112, 111, 121), (120, 120, 120))
+    assert ex._salida_gestionada(*hasta_el_objetivo, ex.PARCIAL) == (16.0, 1, False, 0.5)  # media a 112 y media a 120
