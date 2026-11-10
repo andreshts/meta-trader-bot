@@ -20,6 +20,7 @@ Bot de trading algorítmico automatizado que combina Machine Learning (**Random 
 ├── calendario.py             # Calendario económico exportado por mql5/RF_Calendario.mq5: filtro de noticias
 ├── cartera.py                # Mide reglas de cartera sobre los trades del walk-forward de los 5 activos
 ├── informe.py                # Informe de rendimiento: esperanza en R, profit factor, drawdown y desgloses
+├── inventario_ticks.py       # Cuánto histórico de ticks entrega el broker y con qué campos
 ├── medicion.py               # Compara la ejecución real (operaciones.csv) con los supuestos del backtest
 ├── vigilante.py              # Relanza los bots que se caen y avisa (iniciar_vigilante.bat)
 ├── tendencia.py              # Backtest de seguimiento de tendencia por reglas (Donchian) en varios mercados

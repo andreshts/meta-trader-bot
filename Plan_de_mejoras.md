@@ -154,14 +154,25 @@ Depende de 2.3 (ADX). Clasifica el mercado en tendencia alcista, tendencia bajis
 
 La información que no está en OHLC es la más prometedora, porque la dirección no se puede predecir con velas (ROC-AUC 0.51–0.53 en 4 mercados y 2 timeframes).
 
-- [ ] **5.1 Inventario de ticks**: medir cuánto histórico de ticks da MetaQuotes-Demo (`copy_ticks_range`), con qué campos (bid, ask, flags, volumen) y con qué calidad.
-  - Hecho cuando: hay una tabla de profundidad y calidad por año, como la de velas.
-  - Resultado:
-- [ ] **5.2 Features de ticks** (si 5.1 da suficiente histórico): desequilibrio de ticks al alza/baja, velocidad de ticks, dinámica del spread dentro de la vela y saltos de precio.
-  - Hecho cuando: pasa el protocolo, o se marca ❌.
-  - Resultado:
-- [ ] **5.3 Libro de órdenes** (`market_book_get`): en Forex retail normalmente no está disponible. Comprobar si el broker lo ofrece; si no, se descarta.
-  - Resultado:
+- [x] **5.1 Inventario de ticks** ([inventario_ticks.py](inventario_ticks.py), 2026-11-10, en Exness-MT5Trial11 con los 5 activos): un día de muestra por semestre desde 2019 y los tres últimos miércoles.
+  - **Profundidad:** el primer tick disponible es del 2026-01-01 en todos los activos; antes no hay nada (comprobado mes a mes en 2025, con reintentos). Son unos 10 meses.
+  - **Campos:** solo cotizaciones, bid y ask. Ningún tick trae `last`, volumen ni las banderas de compra o venta, así que no hay operaciones reales con las que medir un desequilibrio.
+  - **Densidad, muy desigual en el tiempo:**
+
+    | Activo | 2026-01-14 | 2026-07-08 | 2026-11-04 |
+    | :--- | ---: | ---: | ---: |
+    | EUR/USD | 26/min | 26/min | 49/min |
+    | Oro | 319/min | 309/min | 274/min |
+    | S&P 500 | 104/min | 78/min | 442/min |
+    | Nasdaq | 169/min | 206/min | 3.145/min |
+    | DAX | 29/min | 102/min | 117/min |
+
+  - **Coste:** unos 450 MB de disco por 5 días de muestra de 4 activos (la terminal guarda el mes entero de cada día pedido).
+- [ ] 🔒 **5.2 Features de ticks**: desequilibrio de ticks al alza/baja, velocidad de ticks, dinámica del spread dentro de la vela y saltos de precio.
+  - Bloqueado por 5.1 (2026-11-10): con los ticks de Exness no se puede evaluar. Solo hay 10 meses, que además son exactamente el holdout del banco de experimentos (desde 2026-01-01); la densidad cambia hasta 18 veces dentro del mismo año, así que una feature de velocidad de ticks mediría el cambio del proveedor y no el mercado; y sin operaciones, el desequilibrio solo se puede aproximar por el sentido de cada cambio de precio.
+  - Para desbloquearlo hace falta otra fuente con años de ticks (por ejemplo un histórico descargable de cotizaciones), comprobando antes que sus velas M15 coinciden con las de Exness, o grabar los ticks de Exness desde ahora y esperar a tener al menos dos años.
+- ❌ **5.3 Libro de órdenes** (`market_book_get`): en Forex retail normalmente no está disponible. Comprobar si el broker lo ofrece; si no, se descarta.
+  - Resultado (2026-11-10): Exness no lo ofrece. `market_book_add` falla en EUR/USD y en el Nasdaq. Descartado.
 - [ ] **5.4 Datos externos**: calendario económico (también de la Fase 1.4), activos relacionados (índice del dólar, diferenciales de tipos, oro) y sentimiento.
   - Cada fuente nueva necesita su propio histórico alineado en hora del servidor.
   - Resultado parcial (2026-11-10, ❌ activos relacionados): rentabilidad a 1 h y 4 h de los otros cuatro activos de Exness como features. `t` medio por activo −2.87 / −0.08 / +0.08 / −0.69 / −0.89; mejora a la base en el S&P 500 y el DAX, sin acercarse a `t` = 2, y el ROC-AUC no cambia. El calendario económico se evaluó en 1.4 (❌ como feature). Queda por evaluar el sentimiento.
@@ -243,4 +254,5 @@ La dirección de EURUSD M15 no se puede predecir con velas (Fases 2 y 5), y en p
 | 2026-11-10 | Calendario económico (1.4): servicio MQL5, filtro en el bot y dos variantes en el banco, ❌ sin ventaja. Gestión de la posición (1.6: breakeven, trailing y parcial): medida en el banco, ❌ ninguna mejora; implementada en el bot y desactivada por defecto. |
 | 2026-11-10 | Reglas de cartera (1.7): `cartera.py` y opciones del bot; la reducción en drawdown baja el drawdown máximo un 42 %, las otras dos apenas cambian nada. |
 | 2026-11-10 | Informe de rendimiento ([informe.py](informe.py)): estadísticas en R y desgloses por activo, lado, salida y sesión, con la esperanza del backtest al lado; semanal por Telegram desde el vigilante y bajo demanda con `/informe`. |
+| 2026-11-10 | Fase 5: inventario de ticks de Exness (5.1, hecho: solo desde 2026-01-01 y solo bid/ask), features de ticks bloqueadas por falta de histórico (5.2) y libro de órdenes descartado (5.3). |
 | 2026-11-02 | Añadida y evaluada 6.2 (cartera diversificada por sectores; enmienda de los índices con ETFs por falta de datos): ❌ sin ventaja. `tendencia.py --diversificada`, con filtro de calidad, pesos por sector y aviso de spreads erróneos (138 tests). |
