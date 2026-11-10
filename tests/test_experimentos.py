@@ -217,3 +217,23 @@ def test_el_parcial_cierra_la_mitad_a_mercado_y_protege_el_resto():
     assert ex._salida_gestionada(*sube_y_vuelve, ex.PARCIAL) == (4.0, 1, False, 0.5)  # media a 108 y media en la entrada
     hasta_el_objetivo = camino((100, 99, 111), (112, 111, 121), (120, 120, 120))
     assert ex._salida_gestionada(*hasta_el_objetivo, ex.PARCIAL) == (16.0, 1, False, 0.5)  # media a 112 y media a 120
+
+
+# ---------------- otros modelos ----------------
+@pytest.mark.parametrize("nombre", ["boosting", "logistica", "bosque_500", "bosque_profundo"])
+def test_cada_modelo_alternativo_entrena_se_calibra_y_da_probabilidades(nombre):
+    rng = np.random.default_rng(0)
+    X = pd.DataFrame(rng.normal(size=(400, 4)), columns=list("abcd"))
+    y = (X["a"] + rng.normal(0, 0.5, 400) > 0).astype(int)
+    original = tm.nuevo_modelo
+    with ex.con_variante(ex.VARIANTES[nombre], {}):
+        assert tm.nuevo_modelo is not original
+        modelo = tm.calibrar(tm.nuevo_modelo(7).fit(X[:300], y[:300]), X[300:], y[300:])
+        proba = modelo.predict_proba(X[300:])[:, 1]
+    assert tm.nuevo_modelo is original
+    assert ((proba >= 0) & (proba <= 1)).all() and np.corrcoef(proba, X["a"][300:])[0, 1] > 0.5
+
+
+def test_la_semilla_llega_al_modelo_alternativo():
+    assert ex.boosting(3).random_state == 3 and ex.bosque(500, 5, 25)(9).random_state == 9
+    assert ex.bosque(500, 5, 25)(9).n_estimators == 500 and ex.VARIANTES[ex.BASE].modelo is None

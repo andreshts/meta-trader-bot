@@ -161,6 +161,28 @@ def etiquetar_con_gestion(gestion: str, etiquetar=tm.etiquetar_triple_barrera):
     return etiquetar_gestionado
 
 
+# ---------------- otros modelos sobre las mismas features (hiperparámetros fijados de antemano) ----------------
+def boosting(semilla: int):
+    from sklearn.ensemble import HistGradientBoostingClassifier
+    return HistGradientBoostingClassifier(max_iter=200, learning_rate=0.05, max_depth=3, min_samples_leaf=50,
+                                          l2_regularization=1.0, random_state=semilla)
+
+
+def logistica(semilla: int):
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import StandardScaler
+    return make_pipeline(StandardScaler(), LogisticRegression(C=0.1, max_iter=1000, random_state=semilla))
+
+
+def bosque(arboles: int, profundidad: int, hoja: int):
+    def nuevo(semilla: int):
+        from sklearn.ensemble import RandomForestClassifier
+        return RandomForestClassifier(n_estimators=arboles, max_depth=profundidad, min_samples_split=2 * hoja,
+                                      min_samples_leaf=hoja, max_features="sqrt", random_state=semilla, n_jobs=-1)
+    return nuevo
+
+
 def _sin_cambios(df: pd.DataFrame, contexto: dict) -> pd.DataFrame:
     return df
 
@@ -173,6 +195,7 @@ class Variante:
     filtro: object = None  # filas en las que se permite entrar (como el filtro de spread: ni entrenan ni cuentan)
     segmentos_train: int | None = None  # None = anclado; n = solo los últimos n segmentos (ventana deslizante)
     gestion: str | None = None  # cómo sale cada trade: None = stop y objetivo fijos
+    modelo: object = None  # semilla -> clasificador con predict_proba; None = el Random Forest de train_model
 
     def columnas(self, contexto: dict) -> list:
         return list(self.features(contexto) if callable(self.features) else self.features)
@@ -195,6 +218,10 @@ VARIANTES = {
     "breakeven": Variante("M2 Stop a la entrada cuando el precio llega a +1 R", gestion=BREAKEVEN),
     "trailing": Variante("M2 Stop dinámico a 1,5 ATR del mejor precio alcanzado", gestion=TRAILING),
     "parcial": Variante("M2 Media posición cerrada a +1 R y stop a la entrada para el resto", gestion=PARCIAL),
+    "boosting": Variante("M Gradient boosting por histogramas (200 árboles de profundidad 3, tasa 0,05)", modelo=boosting),
+    "logistica": Variante("M Regresión logística con las features normalizadas (C = 0,1)", modelo=logistica),
+    "bosque_500": Variante("M El mismo Random Forest con 500 árboles en vez de 150", modelo=bosque(500, 5, 25)),
+    "bosque_profundo": Variante("M Random Forest de 500 árboles, profundidad 10 y hojas de 50", modelo=bosque(500, 10, 50)),
     "deslizante": Variante("4.3 Entrenamiento con ventana deslizante de unos 12 meses", segmentos_train=VENTANA_DESLIZANTE_SEGMENTOS),
 }
 
@@ -203,7 +230,7 @@ VARIANTES = {
 @contextmanager
 def con_variante(variante: Variante, contexto: dict):
     """Aplica la variante a train_model mientras dura el bloque y lo deja todo como estaba al salir."""
-    originales = list(FEATURES), tm.build_features, tm.ventanas_walk_forward, tm.etiquetar_triple_barrera
+    originales = list(FEATURES), tm.build_features, tm.ventanas_walk_forward, tm.etiquetar_triple_barrera, tm.nuevo_modelo
 
     def features_con_extra(velas: pd.DataFrame, point: float) -> pd.DataFrame:
         return variante.extra(build_features(velas, point), contexto)
@@ -219,11 +246,13 @@ def con_variante(variante: Variante, contexto: dict):
         tm.ventanas_walk_forward = ventanas_deslizantes
     if variante.gestion is not None:
         tm.etiquetar_triple_barrera = etiquetar_con_gestion(variante.gestion, originales[3])
+    if variante.modelo is not None:
+        tm.nuevo_modelo = variante.modelo
     try:
         yield
     finally:
         FEATURES[:] = originales[0]
-        tm.build_features, tm.ventanas_walk_forward, tm.etiquetar_triple_barrera = originales[1:]
+        tm.build_features, tm.ventanas_walk_forward, tm.etiquetar_triple_barrera, tm.nuevo_modelo = originales[1:]
 
 
 def preparar(variante: Variante, velas: pd.DataFrame, point: float, costes: dict, contexto: dict) -> pd.DataFrame:
