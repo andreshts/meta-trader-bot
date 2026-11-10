@@ -38,7 +38,12 @@ COLUMNAS_VISTA = (("apertura", "Apertura", 115, "w"), ("tipo", "Tipo", 60, "w"),
                   ("resultado", "Resultado", 80, "e"))
 COMUNES_INICIALES = {"horas": "5", "perdida_diaria": f"{config.MAX_PERDIDA_DIARIA_PCT * 100:g}",
                      "drawdown": f"{config.MAX_DRAWDOWN_PCT * 100:g}", "riesgo_abierto": "2", "max_posiciones": "3",
-                     "riesgo": "", "sin_entradas": "-".join(EURUSD.sin_entradas), "cerrar_al_limite": ""}
+                     "riesgo": "", "sin_entradas": "-".join(EURUSD.sin_entradas), "cerrar_al_limite": "",
+                     "reducir_en_drawdown": "", "limite_correlacion": ""}
+# Casillas comunes: (clave, opción del lanzador, texto). Las opciones no llevan valor y van al final de la orden.
+CASILLAS = (("cerrar_al_limite", "--cerrar-al-limite", "Cerrar las posiciones al alcanzar la pérdida diaria o el drawdown"),
+            ("reducir_en_drawdown", "--reducir-en-drawdown", "Medio lote mientras la equity esté un 5 % o más bajo su máximo"),
+            ("limite_correlacion", "--limite-correlacion", "No repetir el mismo lado en dos índices a la vez"))
 ANCHOS = {"sin_entradas": 12}  # los demás campos comunes son números cortos
 
 
@@ -116,7 +121,7 @@ def comando(activo: Activo, ajustes: dict, comunes: dict) -> list[str]:
         *_tope(comunes, "riesgo_abierto", "--riesgo-abierto", "El riesgo abierto", 0.01, 100),
         *_tope(comunes, "max_posiciones", "--max-posiciones", "El máximo de posiciones", 1, 100, entero=True),
         "--sin-entradas", _franja(comunes.get("sin_entradas", COMUNES_INICIALES["sin_entradas"])),
-        *(["--cerrar-al-limite"] if comunes.get("cerrar_al_limite") else []),  # sin valor: va al final
+        *(opcion for clave, opcion, _ in CASILLAS if comunes.get(clave)),
     ]
 
 
@@ -290,8 +295,9 @@ class Ventana:
                 ttk.Label(abajo, text=texto).grid(row=fila, column=2 * columna, padx=(0 if columna == 0 else 14, 4), pady=2, sticky="e")
                 ttk.Entry(abajo, textvariable=self.comunes[clave], width=ANCHOS.get(clave, 6), justify="right").grid(
                     row=fila, column=2 * columna + 1, columnspan=3 if clave in ANCHOS else 1, sticky="w")
-        ttk.Checkbutton(abajo, text="Cerrar las posiciones al alcanzar la pérdida diaria o el drawdown", onvalue="1", offvalue="",
-                        variable=self.comunes["cerrar_al_limite"]).grid(row=len(campos), column=0, columnspan=7, sticky="w", pady=(4, 0))
+        for n, (clave, _, texto) in enumerate(CASILLAS):
+            ttk.Checkbutton(abajo, text=texto, onvalue="1", offvalue="", variable=self.comunes[clave]).grid(
+                row=len(campos) + n, column=0, columnspan=7, sticky="w", pady=(4 if n == 0 else 0, 0))
         ttk.Button(abajo, text="Iniciar marcados", command=self.iniciar).grid(row=0, column=7, padx=(14, 6))
         ttk.Button(abajo, text="Detener todos", command=self.detener_todos).grid(row=0, column=8)
 

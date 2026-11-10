@@ -63,6 +63,15 @@ ACTIVOS = {a.simbolo: a for a in (
 )}
 
 
+# Activos que suelen moverse juntos: una posición del mismo lado en dos de ellos es casi la misma apuesta.
+GRUPOS_CORRELACION = (("US500m", "USTECm", "DE30m"),)
+
+
+def grupo_de(simbolo: str) -> tuple:
+    """Los símbolos del grupo de correlación de ese activo, él incluido; él solo si no está en ninguno."""
+    return next((grupo for grupo in GRUPOS_CORRELACION if simbolo in grupo), (simbolo,))
+
+
 def hora_modelo(tiempos) -> np.ndarray:
     """Pasa la hora de Exness (UTC) a la de los modelos: UTC+2 o UTC+3 según el horario de EE. UU.
 

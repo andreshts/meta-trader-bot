@@ -358,3 +358,11 @@ def test_el_cierre_al_limite_solo_se_pide_si_esta_marcado(activo, monkeypatch):
     assert args.cerrar_al_limite and args.sin_entradas == ("23:30", "01:15")
     monkeypatch.setattr("sys.argv", ["x", *pc.comando(activo, AJUSTES, COMUNES)[2:]])
     assert not demo_exness_bot.leer_argumentos().cerrar_al_limite
+
+
+def test_las_reglas_de_cartera_marcadas_llegan_al_lanzador(activo, monkeypatch):
+    orden = pc.comando(activo, AJUSTES, {**COMUNES, "reducir_en_drawdown": "1", "limite_correlacion": "1"})
+    assert orden[-2:] == ["--reducir-en-drawdown", "--limite-correlacion"] and "--cerrar-al-limite" not in orden
+    monkeypatch.setattr("sys.argv", ["x", *orden[2:]])
+    args = demo_exness_bot.leer_argumentos()
+    assert args.reducir_en_drawdown and args.limite_correlacion and not args.por_confianza and not args.cerrar_al_limite

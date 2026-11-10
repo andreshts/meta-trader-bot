@@ -25,7 +25,7 @@ import alertas
 import calendario
 import config
 import trading_bot
-from activos import ACTIVOS, EURUSD, Activo, en_franja, es_cierre_diario, hora_modelo, segundos_del_dia
+from activos import ACTIVOS, EURUSD, Activo, en_franja, es_cierre_diario, grupo_de, hora_modelo, segundos_del_dia
 from cuenta import CUENTA, LOGS
 from features import build_features
 from panel_mt5 import PanelMT5
@@ -227,6 +227,12 @@ def leer_argumentos() -> argparse.Namespace:
     parser.add_argument("--drawdown", type=porcentaje, help="caída máxima desde el máximo de equity, en %%")
     parser.add_argument("--gestion", choices=trading_bot.GESTIONES,
                         help="gestión de la posición abierta: stop a la entrada, stop dinámico o cierre de la mitad a +1 R")
+    parser.add_argument("--limite-correlacion", action="store_true",
+                        help="sin entrada si otro activo de su grupo de correlación ya tiene una posición del mismo lado")
+    parser.add_argument("--reducir-en-drawdown", action="store_true",
+                        help="medio lote mientras la equity esté un 5 %% o más por debajo de su máximo")
+    parser.add_argument("--por-confianza", action="store_true",
+                        help="lote y medio cuando la probabilidad supera su umbral en 0.05 o más")
     parser.add_argument("--cerrar-al-limite", action="store_true",
                         help="al alcanzar la pérdida diaria o el drawdown, cierra además la posición abierta del activo")
     parser.add_argument("--riesgo-abierto", type=porcentaje,
@@ -248,6 +254,9 @@ def configurar_activo(activo: Activo, args: argparse.Namespace) -> None:
     config.MAX_DRAWDOWN_PCT = args.drawdown or config.MAX_DRAWDOWN_PCT
     config.CERRAR_AL_LIMITE = args.cerrar_al_limite
     config.GESTION = args.gestion
+    config.SIMBOLOS_CORRELACIONADOS = set(grupo_de(activo.simbolo)) if args.limite_correlacion else None
+    config.REDUCIR_EN_DRAWDOWN = args.reducir_en_drawdown
+    config.TAMANO_POR_CONFIANZA = args.por_confianza
     config.MT5_PATH = CUENTA.terminal
     config.EXIGIR_VENTAJA_SIGNIFICATIVA = CUENTA.exigir_ventaja
     config.PERMITIR_CUENTA_REAL = CUENTA.real

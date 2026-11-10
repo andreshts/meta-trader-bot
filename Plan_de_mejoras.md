@@ -69,6 +69,21 @@ No depende de encontrar ventaja: protege la cuenta en cualquier caso.
     - `trailing`: +0.26 / −1.14 / 0 / −1.11 / 0 (en el S&P 500 y el DAX ningún umbral es rentable en validación y deja de operar);
     - `parcial`: −0.40 / −0.22 / −0.49 / −0.53 / 0.
   - Las tres quedan implementadas en el bot y probadas (la regla del bot coincide con la de la simulación), **desactivadas por defecto**.
+- [x] **1.7 Reglas de cartera** (2026-11-10; [cartera.py](cartera.py) las mide sobre los trades fuera de muestra del walk-forward de los 5 activos a la vez, 3 semillas, y el bot las aplica con `--limite-correlacion`, `--reducir-en-drawdown` y `--por-confianza`, desactivadas por defecto). Fijadas antes de ver resultados:
+  - **correlación:** sin entrada si otro índice (S&P 500, Nasdaq, DAX) ya tiene una posición del mismo lado;
+  - **reducción:** medio lote mientras la cartera esté 10 R o más bajo su máximo (en el bot, la equity un 5 % o más);
+  - **confianza:** lote y medio si la probabilidad supera su umbral en 0.05 o más.
+  - Resultado (medias de las 3 semillas; unos 2.200 trades):
+
+    | Regla | Total R | `t` por semilla (1 / 2 / 42) | Drawdown máx. R |
+    | :--- | ---: | :--- | ---: |
+    | base | −31.6 | −0.90 / −0.85 / +0.22 | 99.8 |
+    | correlación | −28.8 | −0.90 / −0.85 / +0.34 | 99.7 |
+    | reducción | −22.0 | −1.16 / −0.72 / −0.05 | 57.5 |
+    | confianza | −27.9 | −0.80 / −0.77 / +0.20 | 96.7 |
+    | las tres | −15.2 | −1.11 / −0.56 / +0.25 | 56.3 |
+
+  - La reducción es la única con un efecto claro: el drawdown máximo baja un 42 %. No cambia el signo del resultado: ninguna regla de tamaño lo hace. La correlación descarta un 1 % de los trades y la confianza apenas mueve nada: la probabilidad por encima del umbral no distingue mejores trades.
 - [ ] 🔒 **1.5 Criterio de Kelly**: con una ventaja nula o negativa, Kelly da un tamaño de 0. Bloqueado hasta que exista una ventaja demostrada (Fase 4) y un intervalo de confianza para estimarla.
 
 ---
@@ -226,4 +241,5 @@ La dirección de EURUSD M15 no se puede predecir con velas (Fases 2 y 5), y en p
 | 2026-11-02 | Añadida la Fase 6 (seguimiento de tendencia por reglas), con reglas y criterio fijados antes de ver resultados. Evaluada 6.1 (Donchian 55/20 en D1, 6 mercados, y 5 comprobaciones): ❌ sin ventaja. `tendencia.py` con 23 pruebas nuevas (134 tests). |
 | 2026-11-10 | Banco de experimentos ([experimentos.py](experimentos.py), registro en `experimentos/registro.csv`): evalúa cada variante en los 5 activos de Exness con el walk-forward de `train_model.py`, 3 semillas y holdout desde 2026-01-01 sin tocar. Evaluadas 2.1, 2.2, 3.3a, 3.3b, 4.3 (12 meses) y 5.4 (activos relacionados): ❌ todas. La base da `t` medio −0.08 / +0.60 / −0.48 / −0.47 / −1.91, con mucha dispersión entre semillas (EUR/USD: +2.23 / −1.34 / −1.12). |
 | 2026-11-10 | Calendario económico (1.4): servicio MQL5, filtro en el bot y dos variantes en el banco, ❌ sin ventaja. Gestión de la posición (1.6: breakeven, trailing y parcial): medida en el banco, ❌ ninguna mejora; implementada en el bot y desactivada por defecto. |
+| 2026-11-10 | Reglas de cartera (1.7): `cartera.py` y opciones del bot; la reducción en drawdown baja el drawdown máximo un 42 %, las otras dos apenas cambian nada. |
 | 2026-11-02 | Añadida y evaluada 6.2 (cartera diversificada por sectores; enmienda de los índices con ETFs por falta de datos): ❌ sin ventaja. `tendencia.py --diversificada`, con filtro de calidad, pesos por sector y aviso de spreads erróneos (138 tests). |

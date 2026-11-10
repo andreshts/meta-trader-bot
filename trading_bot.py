@@ -207,8 +207,25 @@ def modo_llenado(info) -> int:
     return mt5.ORDER_FILLING_RETURN
 
 
-def calcular_volumen(info, sl_dist: float):
-    """Lote fijo o por riesgo, ajustado a volume_step y limitado por MAX_LOTES. None si no cabe en volume_min."""
+def factor_de_tamano(estado: dict, margen: float | None) -> float:
+    """Por cuánto se multiplica el lote de esta entrada según las reglas de cartera activas: menos con la cuenta
+    en drawdown, más si la probabilidad superó con holgura su umbral (`margen` = probabilidad - umbral)."""
+    factor = 1.0
+    if config.TAMANO_POR_CONFIANZA and margen is not None and margen >= config.CONFIANZA_MARGEN:
+        factor *= config.CONFIANZA_FACTOR
+    if config.REDUCIR_EN_DRAWDOWN and estado.get("equity_max"):
+        drawdown = (estado["equity_max"] - mt5.account_info().equity) / estado["equity_max"]
+        if drawdown >= config.REDUCCION_DRAWDOWN_PCT:
+            factor *= config.REDUCCION_FACTOR
+    return factor
+
+
+def calcular_volumen(info, sl_dist: float, factor: float = 1.0):
+    """Lote fijo o por riesgo, ajustado a volume_step y limitado por MAX_LOTES. None si no cabe en volume_min.
+
+    `factor` lo escala después (reglas de cartera), sin pasar de los topes ni bajar del lote mínimo: una entrada que
+    cabía no se pierde por reducirla.
+    """
     if config.RIESGO_PCT is None:
         lotes = config.VOLUMEN
     else:
@@ -220,6 +237,9 @@ def calcular_volumen(info, sl_dist: float):
     lotes = round(math.floor(lotes / info.volume_step + 1e-9) * info.volume_step, 8)
     if lotes < info.volume_min:
         return None
+    if factor != 1.0:
+        escalado = min(lotes * factor, info.volume_max, config.MAX_LOTES)
+        lotes = max(info.volume_min, round(math.floor(escalado / info.volume_step + 1e-9) * info.volume_step, 8))
     return lotes
 
 
@@ -245,8 +265,26 @@ def exposicion_de_la_cuenta() -> tuple:
     return len(propias), riesgo
 
 
+def motivo_correlacion(tipo: int):
+    """Con SIMBOLOS_CORRELACIONADOS: motivo si otro activo del grupo ya tiene una posición de los bots del mismo lado."""
+    if not config.SIMBOLOS_CORRELACIONADOS:
+        return None
+    posiciones = mt5.positions_get()
+    if posiciones is None:
+        raise RuntimeError(f"positions_get falló: {mt5.last_error()}")
+    magics = config.MAGICS_CUENTA or {config.MAGIC_NUMBER}
+    mismo_lado = mt5.POSITION_TYPE_BUY if tipo == mt5.ORDER_TYPE_BUY else mt5.POSITION_TYPE_SELL
+    for p in posiciones:
+        if p.magic in magics and p.symbol != config.SYMBOL and p.symbol in config.SIMBOLOS_CORRELACIONADOS and p.type == mismo_lado:
+            return (f"{p.symbol} ya tiene una {'compra' if tipo == mt5.ORDER_TYPE_BUY else 'venta'} abierta y es del "
+                    "mismo grupo de correlación")
+    return None
+
+
 def motivo_exposicion(tipo: int, precio: float, sl: float, volumen: float):
     """Motivo por el que esta entrada no cabe en los límites de la cuenta, o None."""
+    if correlacion := motivo_correlacion(tipo):
+        return correlacion
     if config.MAX_POSICIONES_CUENTA is None and config.MAX_RIESGO_ABIERTO_PCT is None:
         return None
     abiertas, riesgo = exposicion_de_la_cuenta()
@@ -360,7 +398,7 @@ def enviar(request: dict, descripcion: str, confirmar) -> tuple:
     return RECHAZADA, result
 
 
-def abrir(lado: str, atr: float, info, tick, estado: dict) -> None:
+def abrir(lado: str, atr: float, info, tick, estado: dict, margen: float | None = None) -> None:
     verificar_cuenta(estado["login"])
     sl_dist = config.SL_MULTIPLICADOR_ATR * atr
     tp_dist = config.TP_MULTIPLICADOR_ATR * atr
@@ -368,7 +406,10 @@ def abrir(lado: str, atr: float, info, tick, estado: dict) -> None:
     if sl_dist <= distancia_minima:
         log.warning("SL de %.5f por debajo de la distancia mínima %.5f; no se opera", sl_dist, distancia_minima)
         return
-    volumen = calcular_volumen(info, sl_dist)
+    factor = factor_de_tamano(estado, margen)
+    volumen = calcular_volumen(info, sl_dist, factor)
+    if factor != 1.0 and volumen is not None:
+        log.info("Lote ajustado por las reglas de cartera: factor %.2f, volumen %s", factor, volumen)
     if volumen is None:
         log.warning("El lote mínimo %s supera el riesgo permitido; no se opera", info.volume_min)
         return
@@ -873,7 +914,9 @@ def evaluar_entrada(bundle: dict, info, bar_time: int, estado: dict) -> None:
     log.info("P_long=%.3f P_short=%.3f", p_long, p_short)
     if señal_long == señal_short:
         return
-    abrir("long" if señal_long else "short", atr, info, tick, estado)
+    lado = "long" if señal_long else "short"
+    margen = float((p_long if señal_long else p_short) - bundle[f"umbral_{lado}"])
+    abrir(lado, atr, info, tick, estado, margen)
 
 
 def ciclo(bundle: dict, estado: dict) -> None:

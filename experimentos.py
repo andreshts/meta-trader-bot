@@ -238,31 +238,37 @@ def _auc_medio(ventanas: list, lado: str) -> float | None:
     return round(statistics.fmean(valores), 4) if valores else None
 
 
-def evaluar(nombre: str, simbolo: str, paquete: dict, contexto: dict, semillas=SEMILLAS):
-    """Una fila del registro por semilla. `paquete` es lo que guarda --descargar para ese símbolo."""
-    variante, velas = VARIANTES[nombre], paquete["velas"]
+@contextmanager
+def con_ajustes(simbolo: str, velas: pd.DataFrame):
+    """Los costes y filtros de ese activo en config, como en train_exness.py salvo el holdout, mientras dura el bloque."""
     mediana = float(velas["spread"].median())
     ajustes = {"SYMBOL": simbolo, "MAX_SPREAD_PUNTOS": mediana * 25 / 8, "SLIPPAGE_PUNTOS": mediana / 8, "COMISION_PUNTOS": 0,
-               "HOLDOUT_DESDE": HOLDOUT_DESDE}  # como train_exness.py, salvo el holdout
+               "HOLDOUT_DESDE": HOLDOUT_DESDE}
     originales = {clave: getattr(config, clave) for clave in ajustes}
     for clave, valor in ajustes.items():
         setattr(config, clave, valor)
     try:
-        with con_variante(variante, contexto):
-            datos = preparar(variante, velas, paquete["point"], paquete["costes"], contexto)
-            for semilla in semillas:
-                ventanas = tm.walk_forward(datos, semilla)
-                wf = tm._resumen_walk_forward(ventanas)
-                agregado = wf["agregado"]
-                yield {"fecha": datetime.now().isoformat(timespec="seconds"), "variante": nombre, "simbolo": simbolo,
-                       "semilla": semilla, "features": len(FEATURES), "filas": len(datos), "trades": agregado["trades"],
-                       "esperanza_R": round(agregado.get("esperanza_R", 0.0), 4), "t": round(agregado.get("t_stat", 0.0), 2),
-                       "profit_factor": round(min(agregado.get("profit_factor", 0.0), 99.0), 3),
-                       "ventanas_positivas": round(tm._proporcion_positivas(wf), 2),
-                       "auc_long": _auc_medio(ventanas, "long"), "auc_short": _auc_medio(ventanas, "short")}
+        yield
     finally:
         for clave, valor in originales.items():
             setattr(config, clave, valor)
+
+
+def evaluar(nombre: str, simbolo: str, paquete: dict, contexto: dict, semillas=SEMILLAS):
+    """Una fila del registro por semilla. `paquete` es lo que guarda --descargar para ese símbolo."""
+    variante, velas = VARIANTES[nombre], paquete["velas"]
+    with con_ajustes(simbolo, velas), con_variante(variante, contexto):
+        datos = preparar(variante, velas, paquete["point"], paquete["costes"], contexto)
+        for semilla in semillas:
+            ventanas = tm.walk_forward(datos, semilla)
+            wf = tm._resumen_walk_forward(ventanas)
+            agregado = wf["agregado"]
+            yield {"fecha": datetime.now().isoformat(timespec="seconds"), "variante": nombre, "simbolo": simbolo,
+                   "semilla": semilla, "features": len(FEATURES), "filas": len(datos), "trades": agregado["trades"],
+                   "esperanza_R": round(agregado.get("esperanza_R", 0.0), 4), "t": round(agregado.get("t_stat", 0.0), 2),
+                   "profit_factor": round(min(agregado.get("profit_factor", 0.0), 99.0), 3),
+                   "ventanas_positivas": round(tm._proporcion_positivas(wf), 2),
+                   "auc_long": _auc_medio(ventanas, "long"), "auc_short": _auc_medio(ventanas, "short")}
 
 
 # ---------------- registro ----------------

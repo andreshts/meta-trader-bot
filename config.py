@@ -72,6 +72,14 @@ BLOQUEO_CUENTA_PATH = None    # turno entre bots: dos no comprueban la exposici�
 ESPERA_TURNO_CUENTA_S = 10    # si otro bot no suelta el turno en este tiempo, no se entra en esta vela
 MAX_POSICIONES_CUENTA = None  # posiciones abiertas a la vez entre todos los bots
 MAX_RIESGO_ABIERTO_PCT = None  # pérdida si todas las posiciones tocan su SL, como fracción de la equity
+# Reglas de cartera (medidas en cartera.py). Todas desactivadas por defecto.
+SIMBOLOS_CORRELACIONADOS = None  # símbolos del grupo de este activo: sin entrada si otro ya tiene una posición del mismo lado
+REDUCIR_EN_DRAWDOWN = False   # con la equity REDUCCION_DRAWDOWN_PCT o más por debajo de su máximo, el lote se multiplica por REDUCCION_FACTOR
+REDUCCION_DRAWDOWN_PCT = 0.05
+REDUCCION_FACTOR = 0.5
+TAMANO_POR_CONFIANZA = False  # si la probabilidad supera su umbral en CONFIANZA_MARGEN o más, el lote se multiplica por CONFIANZA_FACTOR
+CONFIANZA_MARGEN = 0.05
+CONFIANZA_FACTOR = 1.5
 SLEEP_S = 2
 REINTENTO_CONEXION_S = 5
 AVISO_SIN_CONEXION_S = 60  # un corte más corto solo queda en el log como información
